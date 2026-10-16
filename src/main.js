@@ -211,9 +211,10 @@ class Game {
       progress.hidden = false;
       status.textContent = `Storing ${file.name}…`;
       try {
-        const pack = await installAssetPack(file, (fraction) => { progress.value = fraction; });
+        const { pack, stored } = await installAssetPack(file, (fraction) => { progress.value = fraction; });
         dialog.hidden = true;
         await this.useAssetPack(pack);
+        if (!stored) document.getElementById('pack-info').textContent += ' The browser had no room to keep it, so it is asked for again next time.';
       } catch (error) {
         status.textContent = error.message;
       }
@@ -339,34 +340,50 @@ class Game {
   }
 
   /**
-   * 1v1 with a friend: the host creates an invite link; opening one joins.
-   * Once connected, both sides enter the arena (GO starts playing).
+   * 1v1 with a friend. GO (or "Create invite link") opens a room and puts
+   * you in the arena alone, waiting; the link is copied for you to send.
+   * Opening a link joins that room and enters the arena on the other side.
+   * The first round starts once both players are in.
    */
   setupFriendPlay() {
     const status = document.getElementById('friend-status');
     const link = document.getElementById('friend-link');
     const copy = document.getElementById('friend-copy');
     this.netplay = new Netplay({
-      onMessage: (message) => this.match?.receive?.(message),
+      onMessage: (message) => { if (this.match instanceof Versus) this.match.receive(message); },
       onStatus: (text, connected) => {
-        status.textContent = connected ? `${text}: press GO to play.` : text;
-        if (connected && this.manifest) this.startVersus();
-        if (!connected && this.match instanceof Versus) this.match.opponentName = 'Friend (gone)';
+        status.textContent = text;
+        if (!(this.match instanceof Versus)) {
+          if (!connected) return;
+          this.startVersus();   // a guest enters the arena as soon as it connects
+          status.textContent = 'Connected: press GO to play.';
+        }
+        if (connected) {
+          this.match.connected();
+          this.match.sendAppearance({ agent: this.loadout?.agent?.id ?? null, weapon: this.inventory.current });
+          this.hud.say('Opponent joined', this.time, 2);
+        } else if (this.match.waiting === false) {
+          this.match.disconnected();
+          this.respawn();
+          this.hud.say('Opponent left: waiting for them to rejoin', this.time, 4);
+        }
       },
     });
-    document.getElementById('friend-host').addEventListener('click', async () => {
-      try {
+    this.inviteLink = async () => {
+      if (!this.netplay.isHost || !this.netplay.peer) {
         link.value = await this.netplay.host();
         link.hidden = copy.hidden = false;
-        link.select();
-      } catch (error) {
-        status.textContent = error.message;
       }
-    });
-    copy.addEventListener('click', () => navigator.clipboard?.writeText(link.value).then(() => { status.textContent = 'Link copied. Waiting for your friend…'; }));
+      await navigator.clipboard?.writeText(link.value).catch(() => {});
+      status.textContent = 'Invite link copied: send it to your friend. You wait in the arena until they join.';
+      return link.value;
+    };
+    document.getElementById('friend-host').addEventListener('click', () => this.inviteLink().catch((error) => { status.textContent = error.message; }));
+    copy.addEventListener('click', () => navigator.clipboard?.writeText(link.value).then(() => { status.textContent = 'Link copied.'; }));
     const room = invitedRoom();
     if (room) {
       this.menu.pickMode('friend');
+      status.textContent = 'Joining your friend…';
       this.netplay.join(room);
     }
   }
@@ -375,8 +392,10 @@ class Game {
   go(mode) {
     if (mode === 'friend') {
       if (!(this.match instanceof Versus)) {
-        document.getElementById('friend-status').textContent = 'Not connected yet: create a link, or open one.';
-        return;
+        // Host: into the arena now (pointer lock needs this click), the room opens meanwhile.
+        this.startVersus();
+        // A guest still connecting just waits in the arena; anyone else opens a room.
+        if (!invitedRoom()) this.inviteLink().catch((error) => { document.getElementById('friend-status').textContent = error.message; });
       }
     } else if (mode === 'arena' && (this.world.kind !== 'arena' || this.match instanceof Versus)) this.startArena();
     else if (mode === 'course' && this.world.kind !== 'course') this.newCourse();
@@ -464,16 +483,15 @@ class Game {
     this.hud.showMatch(this.match);
   }
 
-  /** The arena against the connected friend. */
+  /** The arena for a friend match: alone and waiting until the other player is in. */
   startVersus() {
     const arena = new Arena();
     this.world = arena;
     this.renderer.impacts.clear();
     this.hud.showScore(false);
-    this.match = new Versus(arena, this.netplay, this.manifest.weapons);
+    this.match = new Versus(arena, this.netplay);
     this.bot = null;
-    this.match.sendAppearance({ agent: this.loadout?.agent?.id ?? null, weapon: this.inventory.current });
-    this.match.startRound(this.simTime);
+    this.friendLook = null;
     this.respawn();
     this.hud.showMatch(this.match);
   }
@@ -612,7 +630,8 @@ class Game {
     if (match instanceof Versus) this.dressFriend(match);
     const { bot } = this;
     const state = match.character();
-    if (!bot || !state) return [];
+    if (!state) return [];
+    if (!bot) return [{ standIn: state }];   // no asset pack (or still loading): a plain figure
     const characters = this.renderer.characters;
     const clip = characters.pick(bot.clips, state);
     bot.animTime += frameTime * Math.max(0.6, Math.hypot(state.vel.x, state.vel.y) / 250);
@@ -623,11 +642,14 @@ class Game {
   }
 
   dressFriend(match) {
-    const agents = this.manifest?.agents ?? {};
-    const agentId = agents[match.remote.appearance?.agent] ? match.remote.appearance.agent : DEFAULT_AGENTS.t;
-    const weaponId = this.manifest?.weapons[match.remote.state?.weapon] ? match.remote.state.weapon : 'ak47';
+    if (!this.manifest) return;
+    const agents = this.manifest.agents ?? {};
+    const otherTeam = (team) => Object.keys(agents).find((id) => agents[id].team === team);
+    const agentId = agents[match.remote.appearance?.agent] ? match.remote.appearance.agent
+      : agents[DEFAULT_AGENTS.t] ? DEFAULT_AGENTS.t : otherTeam(match.isHost ? 't' : 'ct');
+    const weaponId = this.manifest.weapons[match.remote.state?.weapon] ? match.remote.state.weapon : 'ak47';
     const key = `${agentId}/${weaponId}`;
-    if (this.friendLook === key) return;
+    if (!agentId || this.friendLook === key) return;
     this.friendLook = key;
     const weapon = this.manifest.weapons[weaponId];
     this.loadCharacter(agentId, weaponId, weapon.slot === 'knife' ? 'knife' : weapon.body).then((visual) => {

@@ -42,7 +42,8 @@ export class Hud {
     setText(document.getElementById('hud-opponent'), match.opponentName ?? 'Bot');
     setText(document.getElementById('hud-score-you'), String(match.score.player));
     setText(document.getElementById('hud-score-bot'), String(match.score.opponent));
-    setText(document.getElementById('hud-round'), `Round ${match.score.player + match.score.opponent + (match.overAt === null ? 1 : 0)}`);
+    const round = match.score.player + match.score.opponent + (match.overAt === null ? 1 : 0);
+    setText(document.getElementById('hud-round'), match.waiting ? 'Waiting for opponent…' : `Round ${round}`);
     setText(document.getElementById('hud-health'), String(Math.max(0, Math.round(match.you.health))));
     setText(document.getElementById('hud-armor'), String(Math.round(match.you.armor)));
   }

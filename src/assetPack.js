@@ -80,25 +80,35 @@ export async function openAssetPack() {
 
 /**
  * Uses a picked .zip: checks it, copies it into the browser's file storage
- * (reporting progress as a fraction) and opens the copy.
+ * (reporting progress as a fraction) and opens the copy. Resolves to
+ * { pack, stored }; when the browser has no room for it, the picked file
+ * is used directly and stored is false (it is asked for again next visit).
  */
 export async function installAssetPack(file, onProgress = () => {}) {
   await openZip(file);   // reject a wrong file before copying it
   const directory = await storage();
-  if (!directory) return openZip(file);   // no file storage: use it for this visit only
+  if (!directory) return { pack: await openZip(file), stored: false };   // no file storage: this visit only
   await navigator.storage.persist?.();
-  const handle = await directory.getFileHandle(STORED_PACK, { create: true });
-  const writable = await handle.createWritable();
-  let written = 0;
-  const counting = new TransformStream({
-    transform(chunk, controller) {
-      written += chunk.byteLength;
-      onProgress(written / file.size);
-      controller.enqueue(chunk);
-    },
-  });
-  await file.stream().pipeThrough(counting).pipeTo(writable);
-  return openZip(await handle.getFile());
+  const { quota = Infinity, usage = 0 } = await navigator.storage.estimate?.() ?? {};
+  if (quota - usage < file.size) return { pack: await openZip(file), stored: false };
+  try {
+    const handle = await directory.getFileHandle(STORED_PACK, { create: true });
+    const writable = await handle.createWritable();
+    let written = 0;
+    const counting = new TransformStream({
+      transform(chunk, controller) {
+        written += chunk.byteLength;
+        onProgress(written / file.size);
+        controller.enqueue(chunk);
+      },
+    });
+    await file.stream().pipeThrough(counting).pipeTo(writable);
+    return { pack: await openZip(await handle.getFile()), stored: true };
+  } catch {
+    // Not enough room to keep it: use the picked file for this visit only.
+    await directory.removeEntry(STORED_PACK).catch(() => {});
+    return { pack: await openZip(file), stored: false };
+  }
 }
 
 /** Forgets a stored pack. */

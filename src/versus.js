@@ -6,6 +6,10 @@
  * hit side applies to its own health (combat.js) and answers with its death.
  * The host keeps the score and starts every round.
  *
+ * Starting the mode puts you in the arena alone, waiting. Once the other
+ * player has connected and entered the arena too, the host starts the first
+ * round; host and guest spawn on opposite sides.
+ *
  * It answers the same calls as the bot Match, so the game treats both alike.
  */
 import { applyDamage, hitboxes, traceHitboxes } from './combat.js';
@@ -17,21 +21,23 @@ const SMOOTHING = 20;          // how fast the shown opponent catches up with it
 const fresh = () => ({ health: 100, armor: 100, helmet: true });
 
 export class Versus {
-  /** `weapons` maps weapon ids to manifest weapons, for the damage of the opponent's shots. */
-  constructor(world, netplay, weapons) {
+  constructor(world, netplay) {
     this.world = world;
     this.netplay = netplay;
-    this.weapons = weapons;
-    this.isHost = netplay.isHost;
     this.score = { player: 0, opponent: 0 };
     this.you = fresh();
     this.remote = { ...fresh(), state: null, shown: null, appearance: null };
     this.events = [];
     this.overAt = null;
+    this.waiting = true;       // until both players are in the arena
     this.headPoint = null;
     this.now = 0;
     this.ticks = 0;
     this.opponentName = 'Friend';
+  }
+
+  get isHost() {
+    return this.netplay.isHost;
   }
 
   get playerAlive() {
@@ -39,7 +45,23 @@ export class Versus {
   }
 
   get opponentAlive() {
-    return Boolean(this.remote.state?.alive);
+    return !this.waiting && this.netplay.connected && Boolean(this.remote.state?.alive);
+  }
+
+  /** The other player connected: the guest says it is in the arena; the host then starts. */
+  connected() {
+    this.remote.state = null;
+    this.remote.shown = null;
+    if (!this.isHost) this.netplay.send({ type: 'ready' });
+  }
+
+  /** The other player left: back to waiting, with the score kept. */
+  disconnected() {
+    this.waiting = true;
+    this.remote.state = null;
+    this.remote.shown = null;
+    this.overAt = null;
+    Object.assign(this.you, fresh());
   }
 
   /** Host and guest start on opposite sides. */
@@ -48,7 +70,7 @@ export class Versus {
   }
 
   startRound(time) {
-    if (!this.isHost) return;   // only the host starts rounds
+    if (!this.isHost || !this.netplay.connected) return;   // only the host starts rounds, and only with someone to play
     this.beginRound(time);
     this.netplay.send({ type: 'round', score: { player: this.score.opponent, opponent: this.score.player } });
   }
@@ -56,6 +78,7 @@ export class Versus {
   beginRound(time) {
     Object.assign(this.you, fresh());
     this.overAt = null;
+    this.waiting = false;
     this.events.push({ type: 'round', time, restart: true });
   }
 
@@ -77,6 +100,9 @@ export class Versus {
         this.remote.state = message;
         this.remote.shown ??= { pos: { ...message.pos }, yaw: message.yaw };
         break;
+      case 'ready':
+        if (this.isHost) this.startRound(this.now);
+        break;
       case 'hello':
         this.remote.appearance = { agent: message.agent, weapon: message.weapon };
         break;
@@ -86,7 +112,7 @@ export class Versus {
         break;
       case 'hit': {
         if (!this.playerAlive || this.overAt !== null) break;
-        const stats = message.knife ? message.stats : this.weapons[message.weapon]?.stats;
+        const { stats } = message;
         if (!stats) break;
         const lost = applyDamage(this.you, stats, message.group, message.distance, message.damage);
         this.events.push({ type: 'hit', target: 'player', group: message.group, damage: lost });
@@ -125,7 +151,8 @@ export class Versus {
     if (!this.opponentAlive || !this.playerAlive) return false;
     const hit = traceHitboxes(origin, direction, Math.min(worldDistance, stats.range ?? 8192), this.opponentHitboxes());
     if (!hit) return false;
-    this.netplay.send({ type: 'hit', weapon: weaponId, group: hit.group, distance: hit.distance });
+    const { damage, headshotMultiplier, armorRatio, rangeModifier } = stats;
+    this.netplay.send({ type: 'hit', weapon: weaponId, stats: { damage, headshotMultiplier, armorRatio, rangeModifier }, group: hit.group, distance: hit.distance });
     this.events.push({ type: 'hit', target: 'opponent', group: hit.group, damage: null });
     return true;
   }
@@ -135,7 +162,7 @@ export class Versus {
     const hit = traceHitboxes(origin, direction, heavy ? stats.range2 : stats.range, this.opponentHitboxes());
     if (!hit) return false;
     const knifeStats = { armorRatio: 1.7, rangeModifier: 1, headshotMultiplier: 1 };
-    this.netplay.send({ type: 'hit', knife: true, stats: knifeStats, group: hit.group === 'head' ? 'chest' : hit.group, distance: 0, damage: heavy ? stats.damage2 : stats.damage });
+    this.netplay.send({ type: 'hit', stats: knifeStats, group: hit.group === 'head' ? 'chest' : hit.group, distance: 0, damage: heavy ? stats.damage2 : stats.damage });
     return true;
   }
 
@@ -147,7 +174,7 @@ export class Versus {
   /** One tick: send our state, ease the shown opponent toward theirs, and (as host) restart rounds. */
   tick(player, time, dt, held) {
     this.now = time;
-    if (++this.ticks % SEND_EVERY === 0) {
+    if (this.netplay.connected && ++this.ticks % SEND_EVERY === 0) {
       this.netplay.send({
         type: 'state', pos: player.pos, vel: player.vel, yaw: player.yaw, pitch: player.pitch,
         ducked: player.ducked, onGround: Boolean(player.ground), alive: this.playerAlive, weapon: held,
@@ -169,7 +196,7 @@ export class Versus {
   /** The opponent as a character for drawing. */
   character() {
     const { state, shown } = this.remote;
-    if (!state || !shown) return null;
+    if (!state || !shown || this.waiting) return null;
     return { pos: shown.pos, yaw: shown.yaw, vel: state.vel, ducked: state.ducked, onGround: state.onGround, alive: state.alive };
   }
 }

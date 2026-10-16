@@ -11,6 +11,7 @@ import { Characters } from './characters.js';
 import { Impacts } from './impacts.js';
 import { Viewmodels } from './viewmodel.js';
 import { ARENA_SHADER, SURFACE_SHADER, POINT_SHADER, SPRITE_SHADER } from './shaders.js';
+import { createOrientedBox } from './solids.js';
 import { cross, normalize, sub, add, scale } from './vector.js';
 
 const SURFACE_LAYOUT = [
@@ -183,7 +184,8 @@ export class Renderer {
     this.syncMap(world.scene ?? null);
     if (world.kind === 'arena') {
       this.renderArena({ eye, yaw, pitch, world });
-      this.characters.draw(camera.viewProjection, characters, camera.projectionScale);
+      this.drawStandIns(characters.filter((c) => c.standIn).map((c) => c.standIn));
+      this.characters.draw(camera.viewProjection, characters.filter((c) => !c.standIn), camera.projectionScale);
       this.impacts.draw(camera.viewProjection, time, false);
     } else if (this.mapRenderer) {
       camera.set(eye, yaw, pitch, canvas.width / canvas.height, MAP_NEAR_PLANE, MAP_FAR_PLANE);
@@ -239,6 +241,21 @@ export class Renderer {
     gl.enable(gl.CULL_FACE);
     this.arena.draw(gl.TRIANGLES);
     gl.disable(gl.CULL_FACE);
+  }
+
+  /** Players without a character model ({ pos, ducked }): a plain upright box their size. */
+  drawStandIns(standIns) {
+    if (!standIns.length) return;
+    const faces = standIns.flatMap(({ pos, ducked }) => {
+      const height = ducked ? 54 : 72;
+      const box = createOrientedBox({ top: { x: pos.x, y: pos.y, z: pos.z + height }, heading: 0, halfLength: 16, halfWidth: 16, depth: height }, {});
+      return box.faces.map((vertices, f) => ({ vertices, normal: box.faceNormals[f], color: [0.85, 0.3, 0.2] }));
+    });
+    this.standInMesh ??= new Mesh(this.gl, this.arenaProgram, ARENA_LAYOUT);
+    this.standInMesh.upload(buildArenaVertices(faces), this.gl.DYNAMIC_DRAW);
+    this.gl.useProgram(this.arenaProgram.program);
+    this.gl.enable(this.gl.DEPTH_TEST);
+    this.standInMesh.draw(this.gl.TRIANGLES);
   }
 
   renderCourse({ eye, yaw, pitch, sky, world, time }) {
