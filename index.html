@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Void Hop</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="src/main.js"></script>
+</head>
+<body>
+  <main>
+    <canvas id="view" aria-label="Game view"></canvas>
+
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="scope" class="scope" aria-hidden="true" hidden></div>
+    <div id="damage-flash" aria-hidden="true"></div>
+
+    <section id="hud" aria-label="Game status">
+      <dl id="hud-stats" class="stats">
+        <dt>Platform</dt><dd id="hud-platform">0</dd>
+        <dt>Best</dt><dd id="hud-best">0</dd>
+      </dl>
+      <div id="hud-match" class="hud-match" hidden>
+        <span class="hud-team">You</span>
+        <output id="hud-score-you">0</output>
+        <output id="hud-round" class="hud-round">Round 1</output>
+        <output id="hud-score-bot">0</output>
+        <span id="hud-opponent" class="hud-team">Bot</span>
+      </div>
+      <output id="hud-message" class="hud-message" aria-live="polite"></output>
+      <div id="hud-vitals" class="hud-vitals" hidden>
+        <span class="hud-vital"><span class="hud-vital-icon">+</span><output id="hud-health">100</output></span>
+        <span class="hud-vital"><span class="hud-vital-icon">◆</span><output id="hud-armor">100</output></span>
+      </div>
+      <output id="hud-speed" aria-label="Horizontal speed">0</output>
+      <output id="hud-weapon" aria-label="Held weapon">Knife</output>
+    </section>
+
+    <section id="pack-dialog" class="pack-dialog" hidden aria-labelledby="pack-title">
+      <div class="pack-box">
+        <h2 id="pack-title" class="cs-heading">Asset pack</h2>
+        <p>Weapons, skins, gloves, characters and sounds come from an asset pack: the <code>.zip</code> made by
+          <code>tools/make-asset-pack.sh</code> from your own game install. Choose it to load it. It is kept in this
+          browser, so you only do this once, and it never leaves your computer.</p>
+        <label class="cs-button cs-primary">Choose asset pack (.zip)<input id="pack-file" type="file" accept=".zip"></label>
+        <progress id="pack-progress" max="1" value="0" hidden></progress>
+        <p id="pack-status" class="cs-hint" aria-live="polite"></p>
+        <button id="pack-skip" class="cs-button" type="button">Play without it (bhop and surf only)</button>
+      </div>
+    </section>
+
+    <div id="preview-bar" class="preview-bar" hidden>
+      <span id="preview-name"></span>
+      <button id="preview-back" class="cs-button" type="button">Back to inventory (Esc)</button>
+    </div>
+
+    <section id="menu" class="cs-menu" aria-label="Main menu">
+      <header class="cs-topbar">
+        <div class="cs-logo" aria-label="Void Hop">VOID<span>HOP</span></div>
+        <nav class="cs-tabs" aria-label="Menu">
+          <button class="cs-tab" type="button" data-tab="play" aria-pressed="true"><span class="cs-icon" data-icon="play"></span>Play</button>
+          <button class="cs-tab" type="button" data-tab="inventory" aria-pressed="false"><span class="cs-icon" data-icon="inventory"></span>Inventory</button>
+          <button class="cs-tab" type="button" data-tab="settings" aria-pressed="false"><span class="cs-icon" data-icon="settings"></span>Settings</button>
+        </nav>
+        <p id="weapon-status" class="cs-status" aria-live="polite">Loading assets…</p>
+      </header>
+
+      <section class="cs-page" data-page="play" aria-label="Play">
+        <div class="cs-play-panel">
+          <h2 class="cs-heading">Game mode</h2>
+          <div class="cs-modes" role="radiogroup" aria-label="Game mode">
+            <button class="cs-mode" type="button" role="radio" data-mode="course" aria-checked="true">
+              <strong>Bhop &amp; Surf</strong><span>Procedural course of glowing platforms and surf ramps in deep space.</span>
+            </button>
+            <button class="cs-mode" type="button" role="radio" data-mode="arena" aria-checked="false">
+              <strong>1v1 Arena</strong><span>Rounds against a bot in a small aim arena, first to see the other wins.</span>
+            </button>
+            <button class="cs-mode" type="button" role="radio" data-mode="friend" aria-checked="false">
+              <strong>1v1 with a friend</strong><span>Send a link; you connect browser to browser and play rounds in the arena.</span>
+            </button>
+            <button class="cs-mode" type="button" role="radio" data-mode="map" aria-checked="false">
+              <strong>Load map</strong><span>Any .bsp map (version 19 to 21), drawn with its own textures and lighting.</span>
+            </button>
+          </div>
+
+          <div class="cs-mode-options" data-for="arena" hidden>
+            <label class="cs-field">Bot difficulty
+              <select id="bot-difficulty">
+                <option value="easy">Easy</option>
+                <option value="normal" selected>Normal</option>
+                <option value="hard">Hard</option>
+              </select>
+            </label>
+          </div>
+          <div class="cs-mode-options" data-for="friend" hidden>
+            <div class="cs-row">
+              <button id="friend-host" class="cs-button" type="button">Create invite link</button>
+              <button id="friend-copy" class="cs-button" type="button" hidden>Copy link</button>
+            </div>
+            <input id="friend-link" class="cs-link" type="text" readonly hidden aria-label="Invite link">
+            <p id="friend-status" class="cs-hint" aria-live="polite">Create a link and send it to your friend. Both of you need the asset pack.</p>
+          </div>
+          <div class="cs-mode-options" data-for="map" hidden>
+            <div class="cs-row">
+              <label class="cs-button">Choose .bsp<input id="map-file" type="file" accept=".bsp"></label>
+              <label class="cs-button">Game files (.vpk)<input id="game-files" type="file" accept=".vpk" multiple></label>
+            </div>
+            <p id="map-status" class="cs-hint" aria-live="polite">No map loaded. You can also drop a .bsp onto the page.</p>
+            <p id="game-status" class="cs-hint" aria-live="polite">Textures a map does not pack come from game files:
+              pick a <code>_dir.vpk</code> together with its numbered <code>.vpk</code> files. Picks add up.</p>
+          </div>
+        </div>
+
+        <aside class="cs-loadout-panel" aria-label="Equipped">
+          <h2 class="cs-heading">Equipped</h2>
+          <ul id="equipped" class="cs-equipped"></ul>
+          <button class="cs-button" type="button" data-tab="inventory">Open inventory (B)</button>
+        </aside>
+
+        <button id="play" class="cs-go" type="button">GO</button>
+      </section>
+
+      <section class="cs-page" data-page="inventory" aria-label="Inventory" hidden>
+        <div id="inventory" class="inv"></div>
+      </section>
+
+      <section class="cs-page" data-page="settings" aria-label="Settings" hidden>
+        <div class="cs-settings">
+          <div class="cs-settings-column">
+            <h2 class="cs-heading">Game</h2>
+            <label class="cs-field">Sensitivity
+              <input id="sensitivity" type="number" min="0.1" max="10" step="0.05" value="2">
+            </label>
+            <label class="cs-field">Volume
+              <input id="volume" type="range" min="0" max="100" step="1" value="80">
+            </label>
+            <label class="cs-field">Auto hop (hold jump)
+              <input id="autohop" type="checkbox">
+            </label>
+            <label class="cs-field">Keep death velocity
+              <input id="keep-velocity" type="checkbox">
+            </label>
+            <p class="cs-hint">With auto hop off, time every jump on the tick you land. With it on, hold jump to hop on
+              every landing. Hold A or D while turning the mouse the same way to gain speed in the air. Surf ramps are
+              too steep to stand on: hold the strafe key toward the ramp and look along it.</p>
+            <p class="cs-hint">Each weapon sets your run speed: knife 250, most pistols 240, AK-47 215, AWP 200.</p>
+            <h2 class="cs-heading">Asset pack</h2>
+            <p id="pack-info" class="cs-hint">No asset pack loaded.</p>
+            <div class="cs-row">
+              <button id="pack-change" class="cs-button" type="button">Load another pack</button>
+              <button id="pack-remove" class="cs-button" type="button">Remove stored pack</button>
+            </div>
+          </div>
+          <div class="cs-settings-column">
+            <h2 class="cs-heading">Binds</h2>
+            <table class="binds">
+              <tbody>
+                <tr><th>W A S D</th><td>Move</td></tr>
+                <tr><th>Mouse</th><td>Look and air strafe</td></tr>
+                <tr><th>Space / Mouse wheel</th><td>Jump</td></tr>
+                <tr><th>Ctrl</th><td>Duck</td></tr>
+                <tr><th>Shift</th><td>Walk</td></tr>
+                <tr><th>Mouse1 / Mouse2</th><td>Attack / secondary attack</td></tr>
+                <tr><th>1 / 2 / 3</th><td>Primary / secondary / knife</td></tr>
+                <tr><th>Q</th><td>Last weapon</td></tr>
+                <tr><th>F</th><td>Inspect</td></tr>
+                <tr><th>B</th><td>Inventory</td></tr>
+                <tr><th>R</th><td>Restart (new course, map spawn, new round)</td></tr>
+                <tr><th>Esc</th><td>Menu</td></tr>
+              </tbody>
+            </table>
+            <p class="cs-hint">Only what you equip is loaded from the asset pack, so memory use stays low.</p>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>
