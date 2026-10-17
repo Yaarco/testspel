@@ -5,15 +5,16 @@
  * no shot, stops to shoot once it has seen you for its reaction time, and
  * sprays with its gun's real recoil and inaccuracy. Hits and damage follow
  * the classic rules (combat.js): both start each round with 100 health and kevlar and
- * helmet.
+ * helmet. The bot reloads when its clip runs out, or early while it has no target.
  */
 import { traceLine } from './collision.js';
-import { applyDamage, bulletDirections, hitboxes, traceHitboxes } from './combat.js';
+import { applyDamage, bulletDirections, hitboxes, knifeHit, traceBullet } from './combat.js';
 import { CONVARS } from './config.js';
 import { playerMove } from './movement.js';
 import { Player } from './player.js';
 import { Recoil } from './recoil.js';
-import { add, scale, sub } from './vector.js';
+import { reloadDuration, showsTracer } from './weapons.js';
+import { add, sub } from './vector.js';
 
 export const BOT_DIFFICULTIES = {
   // error: degrees of first aim off target, settling at `settle` per second; control: share of recoil pulled down.
@@ -22,7 +23,6 @@ export const BOT_DIFFICULTIES = {
   hard: { label: 'Hard', reaction: 0.2, turnSpeed: 640, error: 2, settle: 8, control: 0.85, headshots: 0.6, burst: [4, 8] },
 };
 const ROUND_RESTART = 2.5;    // seconds after a death before the next round
-const BULLET_RANGE = 8192;
 const STRAFE_TIME = [0.3, 0.7];
 
 const randomIn = ([min, max]) => min + Math.random() * (max - min);
@@ -63,6 +63,11 @@ export class Match {
     return this.bot.health > 0;
   }
 
+  /** Killed this round (rather than not there at all). */
+  get opponentKilled() {
+    return this.bot.health <= 0;
+  }
+
   startRound(time) {
     Object.assign(this.you, fresh());
     Object.assign(this.bot, fresh());
@@ -70,6 +75,8 @@ export class Match {
     this.bot.player.placeAt(feet, yaw);
     this.bot.player.maxSpeed = this.weapon.stats.maxSpeed;
     this.bot.recoil.reset();
+    this.bot.clip = this.weapon.stats.clip ?? Infinity;
+    this.bot.reloadedAt = 0;
     this.ai = { goal: null, repathAt: 0, seenAt: null, lastSeen: null, strafe: 1, strafeUntil: 0, burst: 0, nextShot: time, aimError: { yaw: 0, pitch: 0 }, aimHead: false };
     this.overAt = null;
     this.events.push({ type: 'round', time });
@@ -86,34 +93,28 @@ export class Match {
     return this.world.spawns.player;
   }
 
-  /** The bot's hitboxes, with the head where its animated model holds it. */
-  botHitboxes() {
+  /** The bot's hitboxes while it can be hurt, with the head where its animated model holds it. */
+  targets() {
+    if (!this.opponentAlive || !this.playerAlive) return [];
     const bot = this.bot.player;
     return hitboxes(bot.pos, bot.ducked, this.headPoint);
   }
 
-  /** A bullet from the player: returns true when it hits the bot before `worldDistance`. */
-  playerShot(origin, direction, stats, worldDistance) {
-    if (!this.opponentAlive || !this.playerAlive) return false;
-    const hit = traceHitboxes(origin, direction, Math.min(worldDistance, stats.range ?? BULLET_RANGE), this.botHitboxes());
-    if (!hit) return false;
-    this.damageBot(stats, hit.group, hit.distance, stats.damage);
-    return true;
+  /** A bullet from the player hit the bot: `hit` from traceBullet. */
+  playerShot(stats, hit) {
+    this.damageBot(stats, hit.group, hit.damage);
   }
 
-  /** A knife swing from the player: light (attack) or heavy (attack2). */
+  /** A knife swing from the player: light (attack) or heavy (attack2). Returns the hit, or null. */
   playerKnife(origin, direction, stats, heavy) {
-    if (!this.opponentAlive || !this.playerAlive) return false;
-    const range = heavy ? stats.range2 : stats.range;
-    const hit = traceHitboxes(origin, direction, range, this.botHitboxes());
-    if (!hit) return false;
-    this.damageBot({ ...stats, armorRatio: 1.7, rangeModifier: 1, headshotMultiplier: 1 }, hit.group === 'head' ? 'chest' : hit.group, 0,
-      heavy ? stats.damage2 : stats.damage);
-    return true;
+    const hit = knifeHit(origin, direction, stats, heavy, this.targets());
+    if (hit) this.damageBot(hit.stats, hit.group, hit.damage);
+    return hit;
   }
 
-  damageBot(stats, group, distance, damage) {
-    const lost = applyDamage(this.bot, stats, group, distance, damage);
+  damageBot(stats, group, damage) {
+    const lost = applyDamage(this.bot, stats, group, damage);
+    this.bot.player.tag();
     this.events.push({ type: 'hit', target: 'opponent', group, damage: lost });
     if (!this.opponentAlive) this.endRound('player');
   }
@@ -202,7 +203,10 @@ export class Match {
     playerMove(bot, cmd, this.world.collision);
 
     this.bot.recoil.update(this.weapon.stats, bot.ducked, time, dt);
-    if (shooting && time >= ai.nextShot && bot.horizontalSpeed < bot.maxSpeed * 0.34) this.botFire(player, time);
+    const { clip } = this.weapon.stats;
+    if (this.bot.clip === 0 || (!visible && this.bot.clip < clip / 3)) this.botReload(time);
+    const loaded = this.bot.clip > 0 && time >= this.bot.reloadedAt;
+    if (shooting && loaded && time >= ai.nextShot && bot.horizontalSpeed < bot.maxSpeed * 0.34) this.botFire(player, time);
     if (!shooting && ai.burst > 0) ai.burst = 0;
   }
 
@@ -241,6 +245,15 @@ export class Match {
     return spots;
   }
 
+  botReload(time) {
+    const { stats } = this.weapon;
+    if (time < this.bot.reloadedAt || !stats.clip || this.bot.clip >= stats.clip) return;
+    const shells = stats.singleShells ? stats.clip - this.bot.clip : 1;
+    this.bot.reloadedAt = time + reloadDuration(this.weapon, shells);
+    this.bot.clip = stats.clip;
+    this.events.push({ type: 'reload', from: { ...this.bot.player.pos }, shells });
+  }
+
   /** The bot fires one shot of a burst; bursts end with a pause so its recoil can reset. */
   botFire(player, time) {
     const { stats } = this.weapon;
@@ -250,21 +263,22 @@ export class Match {
     const inaccuracy = this.bot.recoil.inaccuracy(stats, bot);
     const aim = this.bot.recoil.aimOffset;
     const eye = bot.eye();
-    const boxes = hitboxes(player.pos, player.ducked);
+    const boxes = this.playerAlive ? hitboxes(player.pos, player.ducked) : [];
+    this.bot.clip--;
+    const tracers = [];
+    const tracer = showsTracer(stats, this.bot.clip);
     for (const direction of bulletDirections(bot.yaw + aim.yaw, bot.pitch + aim.pitch, stats, inaccuracy)) {
-      const end = add(eye, scale(direction, BULLET_RANGE));
-      const wall = traceLine(eye, end, this.world.collision);
-      const hit = traceHitboxes(eye, direction, wall.fraction * BULLET_RANGE, boxes);
+      const { hit, impacts, end } = traceBullet(eye, direction, stats, this.world.collision, boxes);
+      if (tracer) tracers.push(end);
+      for (const impact of impacts) this.events.push({ type: 'impact', ...impact });
       if (hit && this.playerAlive) {
-        const lost = applyDamage(this.you, stats, hit.group, hit.distance);
-        this.events.push({ type: 'hit', target: 'player', group: hit.group, damage: lost, from: { ...bot.pos } });
+        const lost = applyDamage(this.you, stats, hit.group, hit.damage);
+        this.events.push({ type: 'hit', target: 'player', group: hit.group, damage: lost, from: { ...bot.pos }, point: end, direction });
         if (!this.playerAlive) this.endRound('opponent');
-      } else if (wall.solid) {
-        this.events.push({ type: 'impact', point: wall.endPos, normal: wall.normal });
       }
     }
     this.bot.recoil.shoot(stats, time);
-    this.events.push({ type: 'shot', from: { ...bot.pos } });
+    this.events.push({ type: 'shot', from: { ...bot.pos }, tracers });
     ai.burst--;
     ai.nextShot = time + (ai.burst > 0 && stats.fullAuto ? stats.cycleTime : Math.max(stats.cycleTime, 0.35));
   }

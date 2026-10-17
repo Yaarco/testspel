@@ -7,8 +7,8 @@
  * Models are glTF (Y up, meters, facing +Z); the game world's is
  * (Z up, inches, X forward), so each model is converted when drawn.
  */
+import { STUDIO_LIGHTING } from './modelLighting.js';
 import { MuzzleFlash } from './muzzleFlash.js';
-import { SkinnedModels } from './skinnedModels.js';
 import { transformPoint } from './viewmodel.js';
 import { clipTracks, invertRigid, multiply, poseNodes } from './skeleton.js';
 
@@ -18,7 +18,6 @@ const RUN_DIRECTIONS = ['run_n', 'run_ne', 'run_e', 'run_se', 'run_s', 'run_sw',
 const CROUCH_DIRECTIONS = ['crouch_n', 'crouch_e', 'crouch_s', 'crouch_w'];
 const RUN_SPEED = 250;          // the speed the run clips are animated for
 const STILL_SPEED = 20;
-const LIGHT = { direction: [0.35, 0.25, 0.9], color: [0.95, 0.9, 0.82], ambient: [0.32, 0.34, 0.4] };
 
 /** glTF (x, y, z) to game space (z, x, y), scaled to inches, turned by yaw (degrees) and placed at `pos`. */
 export function modelMatrix(pos, yaw) {
@@ -33,13 +32,10 @@ export function modelMatrix(pos, yaw) {
   ];
 }
 
-/** A game-space direction into a character's glTF model space (for lighting). */
-function toModelSpace([x, y, z], yaw) {
-  const r = yaw * Math.PI / 180;
-  const [c, s] = [Math.cos(r), Math.sin(r)];
-  const forward = c * x + s * y;
-  const left = -s * x + c * y;
-  return [left, z, forward];
+/** The rotation of a model matrix (see modelMatrix), for turning model normals into world directions. */
+function normalToWorld(model) {
+  const k = 1 / METERS_TO_INCHES;
+  return new Float32Array([model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]].map((v) => v * k));
 }
 
 /** A point of a posed model (glTF space, meters) in the world. */
@@ -163,12 +159,16 @@ export class Characters {
   pose(body, weapon, clip, time, pos, yaw) {
     const matrix = modelMatrix(pos, yaw);
     const world = poseNodes(body.nodes, clip, clip?.duration > 0 ? time % clip.duration : 0);
-    const weaponWorld = weapon && body.hand >= 0 ? weapon.relative.map((relative) => multiply(world[body.hand], relative)) : null;
-    return { matrix, world, weaponWorld };
+    return { matrix, world, weaponWorld: this.holdWeapon(body, weapon, world) };
+  }
+
+  /** The held weapon's node matrices for a body posed as `world`, or null. */
+  holdWeapon(body, weapon, world) {
+    return weapon && body.hand >= 0 ? weapon.relative.map((relative) => multiply(world[body.hand], relative)) : null;
   }
 
   /**
-   * Draws posed characters ({ body, weapon, pose, yaw, flash }) with the
+   * Draws posed characters ({ body, weapon, pose, flash, lighting }) with the
    * world camera's view-projection; `scale` is its projection's x and y
    * scale, for muzzle flashes ({ age, seed }).
    */
@@ -178,9 +178,8 @@ export class Characters {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
-    for (const { body, weapon, pose, yaw, flash } of characters) {
-      const light = { ...LIGHT, direction: toModelSpace(LIGHT.direction, yaw) };
-      this.models.begin(viewProjection, pose.matrix, light);
+    for (const { body, weapon, pose, flash, lighting = STUDIO_LIGHTING } of characters) {
+      this.models.begin(viewProjection, pose.matrix, normalToWorld(pose.matrix), lighting);
       this.models.draw(body, pose.world);
       if (weapon && pose.weaponWorld) this.models.draw(weapon.model, pose.weaponWorld, weapon.variant, weapon.painted);
       const muzzle = flash && weapon && pose.weaponWorld && this.models.muzzle(weapon.model);

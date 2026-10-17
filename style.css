@@ -29,14 +29,20 @@ html, body {
 
 #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
-#crosshair {
-  position: fixed; left: 50%; top: 50%;
-  width: 4px; height: 4px; margin: -2px 0 0 -2px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
-  pointer-events: none;
+/* The crosshair: parts placed in whole pixels around the element (crosshair.js). */
+.crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; opacity: var(--ch-alpha, 1); }
+#crosshair { position: fixed; }
+.ch-part { position: absolute; background: var(--ch-color, #5ff3ff); box-shadow: 0 0 0 var(--ch-outline, 1px) #000; }
+.ch-part[hidden] { display: none; }
+.ch-editor .cs-field input[type="range"] { flex: 1; }
+.ch-value { width: 2.5em; text-align: right; font-size: 12px; color: var(--dim); font-family: var(--mono); }
+.ch-preview {
+  position: relative; height: 140px; margin-bottom: 14px; border: 1px solid var(--line);
+  background: linear-gradient(135deg, #3d4a52 0%, #8c8a7a 45%, #c7c2ae 55%, #2b3136 100%);
 }
+.ch-swatches { display: flex; gap: 6px; margin: -4px 0 14px; }
+.ch-swatch { width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 2px; cursor: pointer; padding: 0; }
+.cs-field input[type="color"] { width: 48px; height: 26px; padding: 0; border: 1px solid var(--line); background: none; }
 
 /* Scopes: a sniper scope is black around a round lens with thin crosshair
    lines across the screen; a rifle sight is a dark ring with a red dot. */
@@ -80,6 +86,18 @@ html, body {
   position: fixed; right: 16px; bottom: 16px;
   font-size: 18px; text-shadow: 0 0 8px rgb(0 0 0 / 0.8);
 }
+#hud-fps {
+  position: fixed; top: 8px; right: 12px;
+  font: 12px/1 ui-monospace, monospace; color: var(--dim);
+  text-shadow: 0 1px 4px rgb(0 0 0 / 0.9);
+}
+#hud-ammo {
+  position: fixed; right: 16px; bottom: 44px;
+  font-family: var(--font); font-size: 30px; font-weight: 700;
+  text-shadow: 0 2px 8px rgb(0 0 0 / 0.8);
+}
+#hud-ammo small { font-size: 18px; color: var(--dim); }
+#hud-ammo.empty { color: #e5554f; }
 .hud-match {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px;
@@ -172,10 +190,11 @@ html, body {
   display: flex; justify-content: space-between; align-items: center; gap: 16px;
   margin-bottom: 10px; font-size: 14px;
 }
-.cs-field input[type="number"], .cs-field select {
+.cs-field input[type="number"], .cs-field input[type="text"], .cs-field input[type="password"], .cs-field select {
   width: 120px; font: inherit; font-size: 13px; color: var(--ink);
   background: rgb(0 0 0 / 0.45); border: 1px solid var(--line); padding: 5px 8px;
 }
+.cs-field input[type="text"], .cs-field input[type="password"] { width: 220px; }
 .cs-field input[type="range"] { width: 160px; accent-color: var(--go); }
 .cs-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--go); }
 
@@ -288,4 +307,34 @@ html, body {
   .cs-loadout-panel { position: static; width: auto; margin-top: 16px; }
   .cs-tab { padding: 0 10px; }
   .cs-status { display: none; }
+}
+
+/* Buy menu: columns of item rows over the dimmed game, a number key per column and per item. */
+.buy-menu { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; background: rgb(0 0 0 / 0.45); }
+.buy-menu[hidden] { display: none; }
+.buy-panel {
+  width: min(1180px, calc(100% - 32px)); max-height: calc(100% - 64px); display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--go);
+}
+.buy-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 14px 16px 0; }
+.buy-columns { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 12px 16px 16px; min-height: 0; }
+.buy-column { display: flex; flex-direction: column; min-height: 0; }
+.buy-column-title {
+  margin: 0 0 8px; padding: 6px 8px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--dim); background: var(--panel-raised); white-space: pre;
+}
+.buy-column.picked .buy-column-title { color: #fff; background: var(--go); }
+.buy-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; max-height: min(64vh, 620px); display: flex; flex-direction: column; gap: 4px; }
+.buy-item {
+  width: 100%; display: grid; grid-template-columns: 14px 64px 1fr; align-items: center; gap: 8px; padding: 4px 8px;
+  font: inherit; font-size: 13px; text-align: left; color: var(--ink); cursor: pointer;
+  background: linear-gradient(180deg, rgb(52 56 66 / 0.9), rgb(30 33 40 / 0.92)); border: 1px solid rgb(255 255 255 / 0.06);
+}
+.buy-item:hover, .buy-item:focus-visible { background: linear-gradient(180deg, rgb(76 159 56 / 0.55), rgb(40 70 34 / 0.7)); outline: none; }
+.buy-key { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.buy-icon { width: 64px; height: 32px; object-fit: contain; }
+.buy-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 760px) {
+  .buy-columns { grid-template-columns: 1fr; overflow-y: auto; }
+  .buy-list { max-height: none; }
 }

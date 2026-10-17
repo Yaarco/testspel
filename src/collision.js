@@ -10,7 +10,7 @@
  */
 import { PLAYER } from './config.js';
 
-const DIST_EPSILON = 0.03125;   // traces stop this far short of a surface
+export const DIST_EPSILON = 0.03125;   // traces stop this far short of a surface
 const CELL_SIZE = 512;
 const MAX_CELLS_PER_SOLID = 4096; // bigger solids go in a list that every query checks
 
@@ -160,6 +160,14 @@ function sweep(start, end, half, height, grid) {
 /** Sweeps the player hull from start to end. Returns the fraction travelled, end position and hit surface. */
 export function traceHull(start, end, height, grid) {
   return sweep(start, end, PLAYER.hullHalfWidth, height, grid);
+}
+
+/** Sweeps a cube of half size `radius` centered on start to end (ragdoll joints); positions are centers. */
+export function traceBox(start, end, radius, grid) {
+  const low = (p) => ({ x: p.x, y: p.y, z: p.z - radius });
+  const trace = sweep(low(start), low(end), radius, radius * 2, grid);
+  trace.endPos = { ...trace.endPos, z: trace.endPos.z + radius };
+  return trace;
 }
 
 /**

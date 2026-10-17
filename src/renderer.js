@@ -8,7 +8,11 @@ import { Camera } from './camera.js';
 import { createProgram, Mesh } from './gl.js';
 import { MapRenderer, MAP_NEAR_PLANE, MAP_FAR_PLANE } from './mapRenderer.js';
 import { Characters } from './characters.js';
+import { Blood } from './blood.js';
+import { viewAxes } from './combat.js';
 import { Impacts } from './impacts.js';
+import { SUN } from './modelLighting.js';
+import { Tracers } from './tracers.js';
 import { Viewmodels } from './viewmodel.js';
 import { ARENA_SHADER, SURFACE_SHADER, POINT_SHADER, SPRITE_SHADER } from './shaders.js';
 import { createOrientedBox } from './solids.js';
@@ -22,7 +26,6 @@ const MAX_EDGES = 8;
 const POINT_LAYOUT = [['aDirection', 3], ['aSize', 1], ['aColor', 4]];
 const SPRITE_LAYOUT = [['aDirection', 3], ['aUv', 2]];
 const ARENA_LAYOUT = [['aPosition', 3], ['aNormal', 3], ['aColor', 3]];
-const ARENA_SUN = normalize({ x: 0.35, y: 0.25, z: 0.9 });
 const ARENA_NEAR_PLANE = 2;
 const ARENA_FAR_PLANE = 20000;
 const NO_EDGE = 1e6;   // padding for faces with fewer than eight edges
@@ -116,7 +119,10 @@ function buildGalaxyVertices(galaxies) {
 export class Renderer {
   constructor(canvas, sky) {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
-    if (!gl) throw new Error('This browser does not support WebGL 2.');
+    if (!gl) {
+      throw new Error('WebGL 2 is off in this browser right now. After a graphics driver crash the browser turns it off '
+        + 'until it is fully closed and reopened; chrome://gpu (or about:support in Firefox) shows its state.');
+    }
     this.gl = gl;
     this.canvas = canvas;
     this.camera = new Camera();
@@ -138,6 +144,8 @@ export class Renderer {
     this.viewmodels = new Viewmodels(gl);
     this.characters = new Characters(gl, this.viewmodels);
     this.impacts = new Impacts(gl);
+    this.tracers = new Tracers(gl);
+    this.blood = new Blood(gl);
     this.arenaProgram = createProgram(gl, ARENA_SHADER);
     this.arena = new Mesh(gl, this.arenaProgram, ARENA_LAYOUT);
     this.arenaSource = null;
@@ -164,6 +172,18 @@ export class Renderer {
     this.canvas.height = Math.round(window.innerHeight * this.pixelRatio);
   }
 
+  /** Bullet holes, blood and tracers of the last world, gone. */
+  clearEffects() {
+    this.impacts.clear();
+    this.blood.clear();
+    this.tracers.clear();
+  }
+
+  /** The height of one pixel, one unit in front of the camera. */
+  pixelAngle() {
+    return 2 * VIEW.verticalHalfFovTan * this.camera.zoom / this.canvas.height;
+  }
+
   /** Rebuilds the world mesh only when the world or its contents change. */
   syncWorld(world) {
     if (this.worldSource.world === world && this.worldSource.version === world.version) return;
@@ -186,17 +206,22 @@ export class Renderer {
       this.renderArena({ eye, yaw, pitch, world });
       this.drawStandIns(characters.filter((c) => c.standIn).map((c) => c.standIn));
       this.characters.draw(camera.viewProjection, characters.filter((c) => !c.standIn), camera.projectionScale);
-      this.impacts.draw(camera.viewProjection, time, false);
     } else if (this.mapRenderer) {
       camera.set(eye, yaw, pitch, canvas.width / canvas.height, MAP_NEAR_PLANE, MAP_FAR_PLANE);
       gl.viewport(0, 0, canvas.width, canvas.height);
       this.mapRenderer.render(camera, time);
       this.characters.draw(camera.viewProjection, characters, camera.projectionScale);
-      this.impacts.draw(camera.viewProjection, time, false);
     } else {
       this.renderCourse({ eye, yaw, pitch, sky, world, time });
-      this.impacts.draw(camera.viewProjection, time, true);
     }
+    // The arena and maps fill the depth buffer; the glowing course does not.
+    const depthTested = world.kind === 'arena' || Boolean(this.mapRenderer);
+    this.impacts.draw(camera.viewProjection, time, !depthTested);
+    if (depthTested) {
+      const { right, up } = viewAxes(yaw, pitch);
+      this.blood.draw(camera.viewProjection, right, up, time);
+    }
+    this.tracers.draw(camera.viewProjection, eye, time, this.pixelAngle(), depthTested);
     if (viewmodel) this.viewmodels.draw(viewmodel.id, viewmodel, canvas.width / canvas.height);
   }
 
@@ -236,7 +261,7 @@ export class Renderer {
     gl.useProgram(program);
     gl.uniformMatrix4fv(uniforms.uViewProjection, false, camera.viewProjection);
     gl.uniform3f(uniforms.uEye, eye.x, eye.y, eye.z);
-    gl.uniform3f(uniforms.uSun, ARENA_SUN.x, ARENA_SUN.y, ARENA_SUN.z);
+    gl.uniform3f(uniforms.uSun, SUN.x, SUN.y, SUN.z);
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     this.arena.draw(gl.TRIANGLES);

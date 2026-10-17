@@ -331,7 +331,9 @@ export const MAP_SKY_SHADER = {
 /**
  * Skinned models (first-person arms and weapons, characters), skinned on the GPU: bone matrices live in
  * a float texture (four texels per bone), so any bone count fits.
- * Lit by a fixed key light plus ambient, with half-lambert wrap.
+ * Lit like engine models (see modelLighting.js): an ambient cube in world
+ * space plus a few directional lights with half-lambert wrap, summed in
+ * linear light and shown in gamma space with the maps' overbright headroom.
  */
 export const SKINNED_SHADER = {
   vertex: `#version 300 es
@@ -361,16 +363,27 @@ export const SKINNED_SHADER = {
     precision highp float;
     uniform sampler2D uBase;
     uniform float uHasBase;
-    uniform vec3 uLightDirection;   // model space, toward the light
-    uniform vec3 uLightColor;
-    uniform vec3 uAmbient;
+    uniform mat3 uNormalToWorld;
+    uniform vec3 uAmbientCube[6];         // +x, -x, +y, -y, +z, -z
+    uniform vec3 uLightDirection[4];      // world space, toward each light
+    uniform vec3 uLightColor[4];
     in vec2 vUv;
     in vec3 vNormal;
     out vec4 outColor;
     void main() {
       vec3 base = uHasBase > 0.5 ? texture(uBase, vUv).rgb : vec3(0.5);
-      float wrap = dot(normalize(vNormal), uLightDirection) * 0.5 + 0.5;
-      outColor = vec4(base * (uAmbient + uLightColor * wrap * wrap), 1.0);
+      vec3 n = normalize(uNormalToWorld * vNormal);
+      vec3 sq = n * n;
+      vec3 light = sq.x * uAmbientCube[n.x >= 0.0 ? 0 : 1]
+                 + sq.y * uAmbientCube[n.y >= 0.0 ? 2 : 3]
+                 + sq.z * uAmbientCube[n.z >= 0.0 ? 4 : 5];
+      for (int i = 0; i < 4; i++) {
+        float len = length(uLightDirection[i]);
+        if (len < 1e-4) continue;
+        float wrap = dot(n, uLightDirection[i] / len) * 0.5 + 0.5;
+        light += uLightColor[i] * wrap * wrap;
+      }
+      outColor = vec4(base * min(pow(light, vec3(1.0 / 2.2)), vec3(2.0)), 1.0);
     }`,
 };
 
@@ -385,12 +398,15 @@ export const IMPACT_SHADER = {
     in vec3 aPosition;
     in vec2 aUv;
     in float aBirth;
+    in float aKind;
     out vec2 vUv;
     out float vBirth;
+    out float vKind;
     void main() {
       gl_Position = uViewProjection * vec4(aPosition, 1.0);
       vUv = aUv;
       vBirth = aBirth;
+      vKind = aKind;
     }`,
   fragment: `#version 300 es
     precision highp float;
@@ -398,12 +414,24 @@ export const IMPACT_SHADER = {
     uniform float uGlow;
     in vec2 vUv;
     in float vBirth;
+    in float vKind;
     out vec4 outColor;
     void main() {
-      float r = length(vUv * 2.0 - 1.0);
+      vec2 p = vUv * 2.0 - 1.0;
+      float r = length(p);
       if (r > 1.0) discard;
       float age = uTime - vBirth;
-      if (uGlow > 0.5) {
+      if (vKind > 0.5) {
+        // Blood: a ragged splat with droplets around it, seeded by its birth time.
+        float a = atan(p.y, p.x);
+        float seed = fract(vBirth * 7.13) * 40.0;
+        float edge = 0.42 + 0.12 * sin(a * 5.0 + seed) + 0.08 * sin(a * 11.0 + seed * 1.7) + 0.05 * sin(a * 23.0 + seed * 0.3);
+        float drops = step(0.93, fract(sin(dot(floor(p * 9.0), vec2(12.9898, 78.233)) + seed) * 43758.5453)) * step(r, 0.95);
+        float body = smoothstep(edge + 0.04, edge - 0.04, r);
+        float alpha = max(body, drops) * 0.88;
+        if (alpha < 0.01) discard;
+        outColor = vec4(mix(vec3(0.28, 0.01, 0.01), vec3(0.42, 0.03, 0.02), smoothstep(edge, 0.0, r)), alpha);
+      } else if (uGlow > 0.5) {
         float heat = 0.35 + 2.5 * exp(-age * 6.0);
         outColor = vec4(vec3(1.0, 0.7, 0.35) * smoothstep(1.0, 0.0, r) * heat * exp(-age * 0.3), 1.0);
       } else {
@@ -672,5 +700,54 @@ export const MUZZLE_SHADER = {
       float glow = exp(-r * 3.0) * 0.35;
       float light = (core + spikes * 0.9 + glow) * uIntensity;
       outColor = vec4(vec3(1.0, 0.78, 0.42) * light + vec3(1.0) * core * core * uIntensity * 0.6, 1.0);
+    }`,
+};
+
+/** A bullet tracer: a thin streak, brightest at its head and along its middle. */
+export const TRACER_SHADER = {
+  vertex: `#version 300 es
+    uniform mat4 uViewProjection;
+    in vec3 aPosition;
+    in vec2 aUv;
+    out vec2 vUv;
+    void main() {
+      gl_Position = uViewProjection * vec4(aPosition, 1.0);
+      vUv = aUv;
+    }`,
+  fragment: `#version 300 es
+    precision highp float;
+    in vec2 vUv;
+    out vec4 outColor;
+    void main() {
+      float across = 1.0 - abs(vUv.y);
+      float along = vUv.x;
+      vec3 color = vec3(1.0, 0.75, 0.38) * across * along * 3.0 + vec3(1.0) * pow(across, 4.0) * along * 1.5;
+      outColor = vec4(color, 1.0);
+    }`,
+};
+
+/** Blood particles: soft round drops, dark red, fading out. */
+export const BLOOD_SHADER = {
+  vertex: `#version 300 es
+    uniform mat4 uViewProjection;
+    in vec3 aPosition;
+    in vec2 aCorner;
+    in float aFade;
+    out vec2 vCorner;
+    out float vFade;
+    void main() {
+      gl_Position = uViewProjection * vec4(aPosition, 1.0);
+      vCorner = aCorner;
+      vFade = aFade;
+    }`,
+  fragment: `#version 300 es
+    precision highp float;
+    in vec2 vCorner;
+    in float vFade;
+    out vec4 outColor;
+    void main() {
+      float r = length(vCorner);
+      if (r > 1.0) discard;
+      outColor = vec4(0.38, 0.02, 0.02, smoothstep(1.0, 0.4, r) * vFade);
     }`,
 };

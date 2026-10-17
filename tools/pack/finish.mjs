@@ -163,6 +163,7 @@ function prune(manifest, out) {
     weapon.icon = orNull(weapon.icon);
     for (const [name, clips] of Object.entries(weapon.clips)) weapon.clips[name] = clips.filter(check);
     for (const s of Object.values(weapon.sounds)) if (s) s.files = sounds(s.files);
+    if (weapon.reload) weapon.reload.sounds = weapon.reload.sounds.map((s) => ({ ...s, files: sounds(s.files) })).filter((s) => s.files.length);
     for (const key of Object.keys(weapon.paint)) {
       weapon.paint[key] = weapon.paint[key].filter((c) => ['masks', 'cavity', 'surface', 'position'].every((k) => check(c[k])));
     }

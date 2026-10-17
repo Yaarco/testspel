@@ -1,10 +1,22 @@
 /**
- * Hits and damage by the classic rules. A fighter's hitboxes are a head sphere and
- * capsules for chest, stomach and legs; damage falls off with distance by
- * the weapon's range modifier, is multiplied per hit group, and kevlar (with
- * a helmet for headshots) takes part of it by the weapon's armor ratio.
+ * Bullets, hits and damage by the classic rules. A fighter's hitboxes are a
+ * head sphere and capsules for chest, stomach and legs. A bullet flies up to
+ * the weapon's range; its damage falls off with distance by the range
+ * modifier, and it goes through up to four walls when the weapon's
+ * penetration power allows, losing damage for each wall and more for thick
+ * ones (walls over 90 units stop it). Damage is multiplied per hit group,
+ * and kevlar (with a helmet for headshots) takes part of it by the weapon's
+ * armor ratio.
  */
+import { traceLine } from './collision.js';
 import { add, dot, scale, sub } from './vector.js';
+
+const PENETRATION = {
+  maxWalls: 4,
+  maxThickness: 90,         // units of solid a bullet can cross in one wall
+  damageLost: 0.16,         // share of damage every wall takes
+  joinGap: 1,               // solids closer than this along the bullet count as one wall
+};
 
 const HIT_GROUPS = {
   head: { multiplier: null, armored: true },   // the weapon's headshot multiplier
@@ -59,14 +71,92 @@ export function traceHitboxes(origin, direction, range, boxes) {
   return hit;
 }
 
+/** How far a ray from `point` (on or inside a convex solid) runs before leaving it, and the plane it leaves by. */
+function exitThrough(solid, point, direction) {
+  const planes = solid.planes;
+  let distance = Infinity;
+  let normal = null;
+  for (let i = 0; i < planes.length; i += 4) {
+    const facing = planes[i] * direction.x + planes[i + 1] * direction.y + planes[i + 2] * direction.z;
+    if (facing <= 0) continue;
+    const t = (planes[i + 3] - (planes[i] * point.x + planes[i + 1] * point.y + planes[i + 2] * point.z)) / facing;
+    if (t < distance) {
+      distance = Math.max(t, 0);
+      normal = { x: planes[i], y: planes[i + 1], z: planes[i + 2] };
+    }
+  }
+  return { distance, normal };
+}
+
 /**
- * Damages a fighter ({ health, armor, helmet }) hit in `group` from
- * `distance` by a weapon's stats; returns the health it lost.
+ * Crosses the wall a bullet entered at `entry` through `solid`, including
+ * solids that touch it along the way. Returns { thickness, exit, normal }, or
+ * null when the wall is too thick.
  */
-export function applyDamage(fighter, stats, group, distance, baseDamage = stats.damage) {
+function crossWall(solid, entry, direction, collision) {
+  let thickness = 0;
+  let point = entry;
+  for (;;) {
+    const out = exitThrough(solid, point, direction);
+    thickness += out.distance;
+    if (thickness > PENETRATION.maxThickness) return null;
+    point = add(point, scale(direction, out.distance));
+    // Look just past the exit for a touching solid; start a little inside, which the trace skips.
+    const next = traceLine(sub(point, scale(direction, 0.5)), add(point, scale(direction, PENETRATION.joinGap)), collision);
+    if (!next.solid) return { thickness, exit: point, normal: out.normal };
+    solid = next.solid;
+    thickness += Math.max(0, dot(sub(next.endPos, point), direction));
+    point = next.endPos;
+  }
+}
+
+/**
+ * One bullet from `origin` along a unit `direction`, through walls and into
+ * the first of `boxes` it reaches. Returns { hit, impacts, end }: hit is
+ * { group, distance, damage } with the damage it still carries (before hit
+ * group and armor), impacts are the { point, normal } holes it left going in
+ * and out of walls, and end is where it stopped.
+ */
+export function traceBullet(origin, direction, stats, collision, boxes = []) {
+  const range = stats.range ?? 8192;
+  const power = stats.penetration ?? 1;
+  const impacts = [];
+  let damage = stats.damage;
+  let start = origin;
+  let travelled = 0;
+  for (let wall = 0; ; wall++) {
+    const left = range - travelled;
+    const trace = traceLine(start, add(start, scale(direction, left)), collision);
+    const reach = trace.fraction * left;
+    const body = boxes.length ? traceHitboxes(start, direction, reach, boxes) : null;
+    const falloff = (distance) => damage * (stats.rangeModifier ?? 1) ** (distance / 500);
+    if (body) {
+      const end = add(start, scale(direction, body.distance));
+      return { hit: { group: body.group, distance: travelled + body.distance, damage: falloff(body.distance) }, impacts, end };
+    }
+    if (!trace.solid || trace.solid.sky) return { hit: null, impacts, end: trace.endPos };
+    impacts.push({ point: trace.endPos, normal: trace.normal });
+    if (wall >= PENETRATION.maxWalls || power <= 0) return { hit: null, impacts, end: trace.endPos };
+
+    const crossed = crossWall(trace.solid, trace.endPos, direction, collision);
+    if (!crossed) return { hit: null, impacts, end: trace.endPos };
+    const resistance = 1 / (trace.solid.penetrationModifier ?? 1);
+    damage = falloff(reach);
+    damage -= damage * PENETRATION.damageLost + (3 / power) * 1.25 * resistance * 3 + resistance * crossed.thickness ** 2 / 24;
+    if (damage < 1) return { hit: null, impacts, end: trace.endPos };
+    impacts.push({ point: crossed.exit, normal: crossed.normal });
+    travelled += reach + crossed.thickness;
+    start = crossed.exit;
+  }
+}
+
+/**
+ * Damages a fighter ({ health, armor, helmet }) hit in `group` by `damage`
+ * (after range and walls) of a weapon with `stats`; returns the health it lost.
+ */
+export function applyDamage(fighter, stats, group, baseDamage) {
   const rule = HIT_GROUPS[group];
-  let damage = baseDamage * (stats.rangeModifier ?? 1) ** (distance / 500);
-  damage *= rule.multiplier ?? stats.headshotMultiplier ?? 4;
+  let damage = baseDamage * (rule.multiplier ?? stats.headshotMultiplier ?? 4);
   let health = damage;
   const armored = fighter.armor > 0 && rule.armored && (group !== 'head' || fighter.helmet);
   if (armored) {
@@ -81,6 +171,19 @@ export function applyDamage(fighter, stats, group, distance, baseDamage = stats.
   const lost = Math.min(fighter.health, Math.max(1, Math.floor(health)));
   fighter.health -= lost;
   return lost;
+}
+
+const KNIFE = { armorRatio: 1.7, headshotMultiplier: 1 };
+
+/**
+ * A knife swing, light or `heavy`, against `boxes`: { group, damage, stats }
+ * ready for applyDamage, and the distance it reached, or null. Knives count
+ * a head hit as a chest hit.
+ */
+export function knifeHit(origin, direction, stats, heavy, boxes) {
+  const hit = traceHitboxes(origin, direction, heavy ? stats.range2 : stats.range, boxes);
+  if (!hit) return null;
+  return { group: hit.group === 'head' ? 'chest' : hit.group, damage: heavy ? stats.damage2 : stats.damage, stats: KNIFE, distance: hit.distance };
 }
 
 /** Unit forward, right and up vectors for view angles (degrees; positive pitch looks down). */

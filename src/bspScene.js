@@ -481,6 +481,8 @@ export async function buildBspScene(bsp, collision, gameArchives = []) {
       end: Number(fogEntity.fogend) || 10000,
       maxDensity: fogEntity.fogmaxdensity !== undefined ? Number(fogEntity.fogmaxdensity) : 1,
     } : null,
+    // Model lighting at a point (feet), for the viewmodel and characters (modelLighting.js).
+    lightingAt: (point) => propLighting(bsp, ambient, collision, point),
     // Footstep surfaces by texinfo, from each material's $surfaceprop.
     surfaceProps: bsp.texinfo.map((texinfo) => resolved.get(texinfo)?.surfaceProp ?? 'default'),
     stats: {

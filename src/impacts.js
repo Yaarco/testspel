@@ -1,16 +1,18 @@
 /**
- * Where bullets hit: the last few dozen impacts, each a small quad on the
- * surface it struck, kept until newer ones replace them.
+ * Marks on surfaces: bullet holes where bullets hit, and blood splats on
+ * walls behind someone hit. The last few dozen are kept, each a small quad
+ * on the surface, until newer ones replace them.
  */
 import { createProgram, Mesh } from './gl.js';
 import { IMPACT_SHADER } from './shaders.js';
 import { cross, normalize } from './vector.js';
 
 const MAX_IMPACTS = 96;
-const HALF_SIZE = 2;          // units; bullet holes are about 4 units across
+const HALF_SIZE = { hole: 2, blood: 7 };   // units; bullet holes are about 4 units across
+const KIND = { hole: 0, blood: 1 };
 const LIFT = 0.1;             // off the surface, so the quad does not fight it for depth
-const LAYOUT = [['aPosition', 3], ['aUv', 2], ['aBirth', 1]];
-const FLOATS_PER_IMPACT = 6 * 6;
+const LAYOUT = [['aPosition', 3], ['aUv', 2], ['aBirth', 1], ['aKind', 1]];
+const FLOATS_PER_IMPACT = 6 * 7;
 
 export class Impacts {
   constructor(gl) {
@@ -29,18 +31,24 @@ export class Impacts {
     this.dirty = true;
   }
 
-  add(point, normal, time) {
+  /** A mark of `kind` ('hole' or 'blood') at `point` on a surface facing `normal`; blood splats get a random size and turn. */
+  add(point, normal, time, kind = 'hole') {
     const helper = Math.abs(normal.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
-    const u = normalize(cross(normal, helper));
+    const turn = Math.random() * Math.PI * 2;
+    const [c, s] = [Math.cos(turn), Math.sin(turn)];
+    const a = normalize(cross(normal, helper));
+    const b = cross(normal, a);
+    const u = { x: a.x * c + b.x * s, y: a.y * c + b.y * s, z: a.z * c + b.z * s };
     const v = cross(normal, u);
+    const size = HALF_SIZE[kind] * (kind === 'blood' ? 0.6 + Math.random() * 0.8 : 1);
     const corner = (su, sv) => [
-      point.x + normal.x * LIFT + (u.x * su + v.x * sv) * HALF_SIZE,
-      point.y + normal.y * LIFT + (u.y * su + v.y * sv) * HALF_SIZE,
-      point.z + normal.z * LIFT + (u.z * su + v.z * sv) * HALF_SIZE,
-      (su + 1) / 2, (sv + 1) / 2, time,
+      point.x + normal.x * LIFT + (u.x * su + v.x * sv) * size,
+      point.y + normal.y * LIFT + (u.y * su + v.y * sv) * size,
+      point.z + normal.z * LIFT + (u.z * su + v.z * sv) * size,
+      (su + 1) / 2, (sv + 1) / 2, time, KIND[kind],
     ];
-    const [a, b, c, d] = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
-    this.data.set([...a, ...b, ...c, ...a, ...c, ...d], this.next * FLOATS_PER_IMPACT);
+    const [q0, q1, q2, q3] = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
+    this.data.set([...q0, ...q1, ...q2, ...q0, ...q2, ...q3], this.next * FLOATS_PER_IMPACT);
     this.next = (this.next + 1) % MAX_IMPACTS;
     this.count = Math.min(this.count + 1, MAX_IMPACTS);
     this.dirty = true;

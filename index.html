@@ -11,7 +11,7 @@
   <main>
     <canvas id="view" aria-label="Game view"></canvas>
 
-    <div id="crosshair" aria-hidden="true"></div>
+    <div id="crosshair" class="crosshair" aria-hidden="true"></div>
     <div id="scope" class="scope" aria-hidden="true" hidden></div>
     <div id="damage-flash" aria-hidden="true"></div>
 
@@ -33,6 +33,8 @@
         <span class="hud-vital"><span class="hud-vital-icon">◆</span><output id="hud-armor">100</output></span>
       </div>
       <output id="hud-speed" aria-label="Horizontal speed">0</output>
+      <output id="hud-ammo" aria-label="Ammo"></output>
+      <output id="hud-fps" aria-label="Frames per second"></output>
       <output id="hud-weapon" aria-label="Held weapon">Knife</output>
     </section>
 
@@ -48,6 +50,8 @@
         <button id="pack-skip" class="cs-button" type="button">Play without it (bhop and surf only)</button>
       </div>
     </section>
+
+    <section id="buy-menu" class="buy-menu" aria-label="Buy menu" hidden></section>
 
     <div id="preview-bar" class="preview-bar" hidden>
       <span id="preview-name"></span>
@@ -114,7 +118,7 @@
         <aside class="cs-loadout-panel" aria-label="Equipped">
           <h2 class="cs-heading">Equipped</h2>
           <ul id="equipped" class="cs-equipped"></ul>
-          <button class="cs-button" type="button" data-tab="inventory">Open inventory (B)</button>
+          <button class="cs-button" type="button" data-tab="inventory">Open inventory</button>
         </aside>
 
         <button id="play" class="cs-go" type="button">GO</button>
@@ -150,6 +154,23 @@
               <button id="pack-change" class="cs-button" type="button">Load another pack</button>
               <button id="pack-remove" class="cs-button" type="button">Remove stored pack</button>
             </div>
+            <h2 class="cs-heading">Connection</h2>
+            <p class="cs-hint">1v1 with a friend connects your browsers directly. Some networks block that; then a
+              relay (TURN) server carries the game. Free ones exist: sign up with a TURN provider and paste the
+              server address, username and password here. Only one of you needs it.</p>
+            <label class="cs-field">Relay server
+              <input id="relay-urls" type="text" placeholder="turn:relay.example.com:3478" spellcheck="false" autocomplete="off">
+            </label>
+            <label class="cs-field">Username
+              <input id="relay-username" type="text" spellcheck="false" autocomplete="off">
+            </label>
+            <label class="cs-field">Password
+              <input id="relay-credential" type="password" autocomplete="off">
+            </label>
+          </div>
+          <div class="cs-settings-column">
+            <h2 class="cs-heading">Crosshair</h2>
+            <div id="crosshair-editor" class="ch-editor"></div>
           </div>
           <div class="cs-settings-column">
             <h2 class="cs-heading">Binds</h2>
@@ -163,9 +184,10 @@
                 <tr><th>Mouse1 / Mouse2</th><td>Attack / secondary attack</td></tr>
                 <tr><th>1 / 2 / 3</th><td>Primary / secondary / knife</td></tr>
                 <tr><th>Q</th><td>Last weapon</td></tr>
+                <tr><th>R</th><td>Reload</td></tr>
                 <tr><th>F</th><td>Inspect</td></tr>
-                <tr><th>B</th><td>Inventory</td></tr>
-                <tr><th>R</th><td>Restart (new course, map spawn, new round)</td></tr>
+                <tr><th>B</th><td>Buy menu</td></tr>
+                <tr><th>Backspace</th><td>Restart (new course, map spawn, new round)</td></tr>
                 <tr><th>Esc</th><td>Menu</td></tr>
               </tbody>
             </table>

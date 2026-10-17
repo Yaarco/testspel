@@ -12,6 +12,9 @@ export class Hud {
     };
     this.scoreList = document.getElementById('hud-stats');
     this.weapon = document.getElementById('hud-weapon');
+    this.ammo = document.getElementById('hud-ammo');
+    this.fps = { element: document.getElementById('hud-fps'), frames: 0, since: 0 };
+    this.ammoText = '';
     this.match = document.getElementById('hud-match');
     this.vitals = document.getElementById('hud-vitals');
     this.message = document.getElementById('hud-message');
@@ -24,6 +27,31 @@ export class Hud {
 
   showWeapon(name) {
     setText(this.weapon, name);
+  }
+
+  /** Counts a frame (`now` in ms); twice a second shows the frames per second since the last update. */
+  countFrame(now) {
+    const fps = this.fps;
+    fps.frames++;
+    if (now - fps.since < 500) return;
+    if (fps.since) setText(fps.element, `${Math.round(fps.frames * 1000 / (now - fps.since))} fps`);
+    fps.frames = 0;
+    fps.since = now;
+  }
+
+  /** Starts the count over, after a pause. */
+  restartFps() {
+    this.fps.frames = 0;
+    this.fps.since = 0;
+  }
+
+  /** Clip and reserve of the gun in hand ({ clip, reserve }), or nothing for a knife. */
+  showAmmo(ammo) {
+    const text = ammo ? `${ammo.clip}/${ammo.reserve}` : '';
+    if (text === this.ammoText) return;
+    this.ammoText = text;
+    this.ammo.replaceChildren(...(ammo ? [String(ammo.clip), Object.assign(document.createElement('small'), { textContent: ` / ${ammo.reserve}` })] : []));
+    this.ammo.classList.toggle('empty', Boolean(ammo) && ammo.clip === 0);
   }
 
   /** Platform and best only mean something on the procedural course. */

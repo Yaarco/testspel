@@ -3,7 +3,8 @@
 # formats a browser reads (.glb, .webp, .wav, .svg), and assets/asset-pack.zip
 # of it, which the game asks for when it is not served next to the page:
 #   - every gun and knife: viewmodel meshes (current and older), base color
-#     textures, draw/idle/attack/inspect animations, shot and draw sounds,
+#     textures, draw/idle/attack/inspect/reload animations, shot, draw and
+#     reload sounds,
 #   - every finish (skin) each of them can have: the paint parameters and
 #     pattern textures, plus each weapon's paint masks, and inventory icons,
 #   - gloves with their finishes, agents (first-person sleeves and gloves,
@@ -31,6 +32,7 @@ echo "Reading game data…"
 "$CONVERTER" -i "$PAK" -l | sed 's/ .*//' > "$WORK/paths.txt"
 "$CONVERTER" -i "$PAK" -o "$WORK" -d > /dev/null \
   -f "scripts/items/items_game.txt,resource/csgo_english.txt,scripts/weapons.vdata_c,soundevents/game_sounds_weapons.vsndevts_c"
+"$CONVERTER" -i "$PAK" -o "$WORK" -d -e vnmclip_c -f "animation/anims/viewmodel/" > /dev/null   # clip events (reload sounds)
 "$CONVERTER" -i "$PAK" -o "$WORK" -d -e vcompmat_c -f "weapons/paints/,gloves/paints/" > /dev/null
 "$CONVERTER" -i "$PAK" -e vmat_c -b DATA -f "materials/models/weapons/customization/,workshop/paintkits/templates/,weapons/models/,gloves/paints/" \
   > "$WORK/vmats.txt"

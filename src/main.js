@@ -1,6 +1,8 @@
 /**
  * Game bootstrap and loop. Movement runs on a fixed tick like a game server;
  * rendering runs every animation frame and interpolates between ticks.
+ * The game keeps running behind the menu, and stops entirely while the
+ * page is in the background or the window has lost focus.
  * The world is the procedural Course, the 1v1 Arena or an imported
  * BspWorld; all expose the same interface (see course.js).
  */
@@ -11,8 +13,8 @@ import { buildBspScene } from './bspScene.js';
 import { BspWorld } from './bspWorld.js';
 import { worldPoint } from './characters.js';
 import { traceLine } from './collision.js';
-import { bulletDirections, viewAxes } from './combat.js';
-import { CONVARS, MOUSE } from './config.js';
+import { bulletDirections, traceBullet, viewAxes } from './combat.js';
+import { CONVARS, MOUSE, VIEW } from './config.js';
 import { Course } from './course.js';
 import { Footsteps } from './footsteps.js';
 import { parseBsp } from './formats/bsp.js';
@@ -31,36 +33,31 @@ import { Renderer } from './renderer.js';
 import { Sky } from './sky.js';
 import { Versus } from './versus.js';
 import { add, lerp, scale, sub } from './vector.js';
-import { Inventory } from './weapons.js';
+import { Inventory, reloadSounds } from './weapons.js';
+import { ModelLighting } from './modelLighting.js';
+import { BuyMenu } from './buyMenu.js';
+import { storage } from './storage.js';
+import { Crosshair } from './crosshair.js';
+import { Ragdoll } from './ragdoll.js';
 
 const TICK_INTERVAL = 1 / CONVARS.tickrate;
 const MAX_FRAME_TIME = 0.25;
-const BULLET_RANGE = 8192;
 // Keys whose Ctrl shortcuts the browser keeps for itself: Ctrl+W closes the tab.
 const BROWSER_RESERVED_KEYS = ['KeyW'];
 const SLOT_LABELS = { primary: 'Primary', secondary: 'Secondary', knife: 'Knife', gloves: 'Gloves', agent: 'Agent' };
 const DEFAULT_AGENTS = { ct: 'ctm_sas', t: 'tm_phoenix' };
 const BOT_WEAPONS = { ct: 'm4a1', t: 'ak47' };
-
-const storage = {
-  load(key, fallback) {
-    try {
-      const stored = localStorage.getItem(key);
-      const value = Number(stored);
-      return stored !== null && Number.isFinite(value) ? value : fallback;
-    } catch {
-      return fallback;
-    }
-  },
-  save(key, value) {
-    try { localStorage.setItem(key, String(value)); } catch { /* storage unavailable */ }
-  },
-};
+const TRACER_START = 24;                  // units in front of the eye where your own tracers appear
+const DEFAULT_MUZZLE = [0.35, -0.45];     // where the muzzle shows before the gun has been drawn
+const GUN_HEIGHT = 50;                    // where others' tracers start, above their feet
+const KILL_HIT_AGE = 0.5;                 // seconds a hit counts as the killing one for the ragdoll
+const SPLAT_REACH = 120;                  // blood reaches walls and floors this close to someone hit
+const MAX_SPREAD_SCREEN = 0.2;            // the dynamic crosshair opens at most this share of the screen height
 
 /** Wires a menu checkbox to a setting and remembers it between sessions. */
 function bindToggle(id, apply) {
   const checkbox = document.getElementById(id);
-  checkbox.checked = storage.load(id, 0) === 1;
+  checkbox.checked = storage.number(id, 0) === 1;
   apply(checkbox.checked);
   checkbox.addEventListener('change', () => {
     apply(checkbox.checked);
@@ -92,20 +89,42 @@ class Game {
     this.previewing = false;      // inspecting an item from the inventory
     this.simTime = 0;
     this.bobPhase = 0;
-    this.best = storage.load('best', 0);
+    this.best = storage.number('best', 0);
     this.started = false;
     this.keepDeathVelocity = false;
     this.time = 0;
     this.accumulator = 0;
     this.lastFrame = performance.now();
+    this.running = true;
+    this.modelLighting = new ModelLighting();
+    this.crosshair = new Crosshair(document.getElementById('crosshair'), document.getElementById('crosshair-editor'));
 
     this.menu = new Menu({ onGo: (mode) => this.go(mode), onTab: () => this.updateMenuVisibility() });
     this.setupSettings();
     this.setupMapLoading();
     this.setupFriendPlay();
     this.setupAssetPack();
+    this.setupPausing();
     this.newCourse();
-    requestAnimationFrame((now) => this.frame(now));
+    this.frameId = requestAnimationFrame((now) => this.frame(now));
+  }
+
+  /** Nothing runs while the page is hidden or another window has focus. */
+  setupPausing() {
+    const pause = () => {
+      this.running = false;
+      cancelAnimationFrame(this.frameId);
+    };
+    const resume = () => {
+      if (this.running || document.hidden) return;
+      this.running = true;
+      this.lastFrame = performance.now();
+      this.hud.restartFps();
+      this.frameId = requestAnimationFrame((now) => this.frame(now));
+    };
+    window.addEventListener('blur', pause);
+    window.addEventListener('focus', resume);
+    document.addEventListener('visibilitychange', () => (document.hidden ? pause() : resume()));
   }
 
   get playing() {
@@ -114,34 +133,54 @@ class Game {
 
   setupSettings() {
     const sensitivity = document.getElementById('sensitivity');
-    sensitivity.value = storage.load('sensitivity', MOUSE.defaultSensitivity);
-    this.input.sensitivity = Number(sensitivity.value);
+    // Clamp so a bad saved or typed value can never make the mouse unusable.
+    const clampSensitivity = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return MOUSE.defaultSensitivity;
+      return Math.min(Math.max(n, MOUSE.minSensitivity), MOUSE.maxSensitivity);
+    };
+    this.input.sensitivity = clampSensitivity(storage.number('sensitivity', MOUSE.defaultSensitivity));
+    sensitivity.value = this.input.sensitivity;
+    storage.save('sensitivity', this.input.sensitivity);
     sensitivity.addEventListener('change', () => {
-      this.input.sensitivity = Number(sensitivity.value) || MOUSE.defaultSensitivity;
+      this.input.sensitivity = clampSensitivity(sensitivity.value);
+      sensitivity.value = this.input.sensitivity;
       storage.save('sensitivity', this.input.sensitivity);
     });
     const volume = document.getElementById('volume');
-    volume.value = storage.load('volume', 80);
+    volume.value = storage.number('volume', 80);
     this.sounds.volume = Number(volume.value) / 100;
     volume.addEventListener('input', () => {
       this.sounds.volume = Number(volume.value) / 100;
       storage.save('volume', volume.value);
     });
+    // The relay server for friend matches: saved as typed, read when connecting.
+    for (const id of ['relay-urls', 'relay-username', 'relay-credential']) {
+      const field = document.getElementById(id);
+      field.value = storage.text(id);
+      field.addEventListener('change', () => storage.save(id, field.value.trim()));
+    }
     bindToggle('autohop', (on) => { CONVARS.sv_autobunnyhopping = on; });
     bindToggle('keep-velocity', (on) => { this.keepDeathVelocity = on; });
 
-    this.canvas.addEventListener('click', () => { if (this.started && !this.previewing) this.startPlaying(); });
+    // Only grab the mouse when it is not already locked: every shot is a click on
+    // the canvas, and re-requesting the lock mid-play makes the browser warp the
+    // cursor and send huge bogus mouse deltas.
+    this.canvas.addEventListener('click', () => { if (this.started && !this.previewing && !this.playing) this.startPlaying(); });
+    document.addEventListener('pointerlockerror', () => console.warn('[input] pointer lock was refused by the browser'));
     document.addEventListener('pointerlockchange', () => {
       this.input.setEnabled(this.playing);
       this.updateMenuVisibility();
     });
     document.getElementById('preview-back').addEventListener('click', () => this.endPreview());
-    // Outside play: B opens the inventory, Esc leaves an item preview, F inspects again.
+    // Outside play: the buy menu takes its keys, B opens it, Esc leaves an item preview, F inspects again.
     window.addEventListener('keydown', (event) => {
       if (this.playing || event.repeat || event.target.matches?.('input, select')) return;
-      if (event.code === 'Escape' && this.previewing) this.endPreview();
+      if (this.buyMenu?.visible) {
+        if (this.buyMenu.key(event.code)) event.preventDefault();
+      } else if (event.code === 'Escape' && this.previewing) this.endPreview();
       else if (event.code === 'KeyF' && this.previewing) this.preview(this.inventory.weapon.slot);
-      else if (event.code === 'KeyB' && this.manifest) this.openInventory();
+      else if (event.code === 'KeyB' && this.buyMenu) this.openBuyMenu();
     });
     window.addEventListener('contextmenu', (event) => event.preventDefault());
     // Last line of defence where Ctrl+W cannot be blocked: ask before leaving.
@@ -151,7 +190,7 @@ class Game {
   }
 
   updateMenuVisibility() {
-    this.menu.visible = !this.playing && !this.previewing;
+    this.menu.visible = !this.playing && !this.previewing && !this.buyMenu?.visible;
     document.getElementById('preview-bar').hidden = !this.previewing || this.playing;
   }
 
@@ -255,6 +294,10 @@ class Game {
         onChange: (loadout, slot) => this.changeLoadout(loadout, slot),
         onInspect: (slot) => this.startPreview(slot),
       });
+      this.buyMenu = new BuyMenu(document.getElementById('buy-menu'), pack, manifest, {
+        onBuy: (kind, id) => this.buy(kind, id),
+        onClose: (resume) => (resume && this.started ? this.startPlaying() : this.updateMenuVisibility()),
+      });
       this.menu.setIcons(pack, manifest.ui?.icons ?? {});
       this.showEquipped();
       const pairs = Object.values(manifest.weapons).reduce((sum, weapon) => sum + weapon.finishes.length, 0);
@@ -305,11 +348,19 @@ class Game {
     })));
   }
 
-  openInventory() {
+  openBuyMenu() {
     if (this.playing) document.exitPointerLock();
     this.previewing = false;
-    this.menu.show('inventory');
+    this.buyMenu.open();
     this.updateMenuVisibility();
+  }
+
+  /** Buys an item from the buy menu: equips it, brings a gun or knife out and goes back to playing. */
+  buy(kind, id) {
+    this.inventoryView.buy(kind, id);
+    if (kind === 'weapon') this.inventory.select(id, this.simTime);
+    if (this.started) this.startPlaying();
+    else this.updateMenuVisibility();
   }
 
   /** Inspects a slot's weapon on screen, out of the inventory. */
@@ -350,6 +401,11 @@ class Game {
     const link = document.getElementById('friend-link');
     const copy = document.getElementById('friend-copy');
     this.netplay = new Netplay({
+      relay: () => ({
+        urls: document.getElementById('relay-urls').value.trim(),
+        username: document.getElementById('relay-username').value.trim(),
+        credential: document.getElementById('relay-credential').value,
+      }),
       onMessage: (message) => { if (this.match instanceof Versus) this.match.receive(message); },
       onStatus: (text, connected) => {
         status.textContent = text;
@@ -448,14 +504,33 @@ class Game {
 
   /** Raw mouse input when the browser supports it, like m_rawinput 1. */
   requestPointerLock() {
-    const request = this.canvas.requestPointerLock({ unadjustedMovement: true });
-    request?.catch?.(() => this.canvas.requestPointerLock());
+    if (this.playing || this.lockPending) return;
+    this.lockPending = true;
+    const done = () => { this.lockPending = false; };
+    // Raw input is only reliable on Windows/macOS; on Linux Chromium it can
+    // report wrongly scaled deltas, so use the normal lock there.
+    const raw = !/Linux/i.test(navigator.userAgent);
+    let request;
+    try {
+      request = this.canvas.requestPointerLock(raw ? { unadjustedMovement: true } : undefined);
+    } catch {
+      request = undefined;
+    }
+    if (request?.then) {
+      request.then(done, () => {
+        try { this.canvas.requestPointerLock()?.then?.(done, done); } catch { done(); }
+      });
+    } else {
+      done();
+    }
   }
 
   setWorld(world) {
     this.world = world;
     this.match = null;
-    this.renderer.impacts.clear();
+    this.renderer.clearEffects();
+    this.ragdoll = null;
+    this.lastOpponent = null;
     this.hud.showScore(world.score !== null);
     this.hud.showMatch(null);
     this.respawn();
@@ -486,9 +561,7 @@ class Game {
   /** The arena for a friend match: alone and waiting until the other player is in. */
   startVersus() {
     const arena = new Arena();
-    this.world = arena;
-    this.renderer.impacts.clear();
-    this.hud.showScore(false);
+    this.setWorld(arena);
     this.match = new Versus(arena, this.netplay);
     this.bot = null;
     this.friendLook = null;
@@ -507,13 +580,15 @@ class Game {
     const { feet, yaw } = (this.match ?? this.world).respawnPoint();
     this.player.placeAt(feet, yaw, speed);
     this.recoil.reset();
+    this.inventory.refill();
+    this.sounds.cancel('reload');
   }
 
   tick() {
     const player = this.player;
     const cmd = this.input.createUserCmd();
-    if (cmd.skins) {
-      this.openInventory();
+    if (cmd.buy && this.buyMenu) {
+      this.openBuyMenu();
       return;
     }
     if (cmd.restart) {
@@ -525,6 +600,7 @@ class Game {
     }
 
     this.simTime += TICK_INTERVAL;
+    this.sounds.update(this.simTime);
     player.previousEye = player.eye();
     player.maxSpeed = this.inventory.stats.maxSpeed;
     const alive = !this.match || this.match.playerAlive;
@@ -559,9 +635,18 @@ class Game {
       if (event.type === 'shot') {
         this.sounds.weapon(event.weapon ?? this.botWeapon, 'attack', this.heard(event.from));
         this.opponentFlash = { at: this.time, seed: Math.random() };
+        const gun = { ...event.from, z: event.from.z + GUN_HEIGHT };
+        for (const end of event.tracers ?? []) this.renderer.tracers.add(gun, end, this.time);
+      } else if (event.type === 'reload') {
+        const reload = this.manifest?.weapons[event.weapon ?? this.botWeapon]?.reload;
+        this.sounds.schedule('opponent-reload', reloadSounds(reload, event.shells), this.simTime, this.heard(event.from));
       }
       else if (event.type === 'impact') this.renderer.impacts.add(event.point, event.normal, this.time);
-      else if (event.type === 'hit' && event.target === 'player') this.hud.hurt();
+      else if (event.type === 'hit' && event.target === 'player') {
+        this.player.tag();
+        this.hud.hurt();
+        if (event.point) this.bleed(event.point, event.direction, false);   // only the splat behind you
+      }
       else if (event.type === 'kill') this.hud.say(event.winner === 'player' ? 'You win the round' : `${match.opponentName ?? 'The bot'} wins the round`, this.time, 2.5);
       else if (event.type === 'round') {
         this.respawn();
@@ -579,45 +664,90 @@ class Game {
     return { volume: Math.max(0.15, 1 - distance / 3000), pan: side * 0.8 };
   }
 
-  /** Weapon switching, attacks and inspecting: each plays its sound and viewmodel animation. */
+  /** Weapon switching, attacks, reloads and inspecting: each plays its sounds and viewmodel animation. */
   updateWeapon(cmd) {
     this.inventory.update(cmd, this.simTime);
-    const clips = { deploy: 'draw', attack: 'attack', attack2: 'attack2', inspect: 'inspect' };
-    for (const { type, weapon, stats: fired } of this.inventory.takeEvents()) {
+    const clips = { deploy: 'draw', attack: 'attack', attack2: 'attack2', inspect: 'inspect', reload: 'reload' };
+    for (const { type, weapon, stats: fired, tracer, shells } of this.inventory.takeEvents()) {
       const { slot } = this.inventory.weapon;
       const stats = fired ?? this.inventory.stats;
       if (type === 'deploy') this.recoil.reset();
+      if (type === 'deploy' || type === 'attack') this.sounds.cancel('reload');
+      if (type === 'reload') {
+        this.sounds.schedule('reload', reloadSounds(this.manifest?.weapons[weapon]?.reload, shells), this.simTime);
+        this.match?.playerReload?.(weapon, shells);
+      }
       if (type === 'attack' && slot !== 'knife') {
-        this.fireBullets(stats);
+        this.fireBullets(stats, tracer);
         this.renderer.viewmodels.flash(this.time);
       }
       if ((type === 'attack' || type === 'attack2') && slot === 'knife' && this.match) {
-        this.match.playerKnife(this.player.eye(), viewAxes(this.player.yaw, this.player.pitch).forward, stats, type === 'attack2');
+        const eye = this.player.eye();
+        const { forward } = viewAxes(this.player.yaw, this.player.pitch);
+        const hit = this.match.playerKnife(eye, forward, stats, type === 'attack2');
+        if (hit) this.bleed(add(eye, scale(forward, hit.distance)), forward, true);
       }
       this.sounds.weapon(weapon, type);
-      this.renderer.viewmodels.play(weapon, clips[type], this.time);
+      this.renderer.viewmodels.play(weapon, clips[type], this.time, shells);
     }
+  }
+
+  /** Where the gun's muzzle shows on screen, as a world point just in front of the eye: your tracers start there. */
+  muzzlePoint(eye, yaw, pitch) {
+    const [right, up] = this.renderer.viewmodels.muzzleTangent ?? DEFAULT_MUZZLE;
+    const axes = viewAxes(yaw, pitch);
+    const half = VIEW.verticalHalfFovTan * this.renderer.camera.zoom * TRACER_START;
+    return add(add(eye, scale(axes.forward, TRACER_START)), add(scale(axes.right, right * half), scale(axes.up, up * half)));
   }
 
   /**
    * One shot of a gun: each bullet leaves along the view plus the aim punch,
-   * scattered within the current inaccuracy, and hits the bot or marks the
-   * wall it reaches. Then the shot kicks the recoil.
+   * scattered within the current inaccuracy, marks the walls it goes into
+   * and through, and may hit the opponent; some shots show a tracer. Then the shot kicks the recoil.
    */
-  fireBullets(stats) {
+  fireBullets(stats, tracer) {
     const player = this.player;
     const aim = this.recoil.aimOffset;
     const eye = player.eye();
     const impacts = [];
+    const tracers = [];
+    const targets = this.match?.targets() ?? [];
     for (const direction of bulletDirections(player.yaw + aim.yaw, player.pitch + aim.pitch, stats, this.recoil.inaccuracy(stats, player))) {
-      const hit = traceLine(eye, add(eye, scale(direction, BULLET_RANGE)), this.world.collision);
-      if (this.match?.playerShot(eye, direction, stats, hit.fraction * BULLET_RANGE, this.inventory.current)) continue;
-      if (!hit.solid || hit.solid.sky) continue;
-      this.renderer.impacts.add(hit.endPos, hit.normal, this.time);
-      impacts.push({ point: hit.endPos, normal: hit.normal });
+      const shot = traceBullet(eye, direction, stats, this.world.collision, targets);
+      if (tracer) tracers.push(shot.end);
+      if (shot.hit) {
+        this.match.playerShot(stats, shot.hit);
+        this.bleed(shot.end, direction, true);
+      }
+      for (const impact of shot.impacts) {
+        this.renderer.impacts.add(impact.point, impact.normal, this.time);
+        impacts.push(impact);
+      }
     }
-    this.match?.shotFired?.({ ...player.pos }, this.inventory.current, impacts);
+    if (tracers.length) {
+      const view = this.recoil.viewOffset;
+      const muzzle = this.muzzlePoint(eye, player.yaw + view.yaw, player.pitch + view.pitch);
+      for (const end of tracers) this.renderer.tracers.add(muzzle, end, this.time);
+    }
+    this.match?.shotFired?.({ ...player.pos }, this.inventory.current, impacts, tracers);
     this.recoil.shoot(stats, this.simTime);
+  }
+
+  /**
+   * Someone is hit at `point` by something travelling along `direction`:
+   * blood sprays there (when `spray`) and splats on a wall close behind and
+   * on the floor below.
+   */
+  bleed(point, direction, spray) {
+    if (spray) {
+      this.renderer.blood.spray(point, direction, this.time);
+      this.lastHit = { point, direction, at: this.time };   // for the ragdoll, if this hit kills
+    }
+    const down = { x: direction.x * 0.3, y: direction.y * 0.3, z: -1 };
+    for (const along of [direction, down]) {
+      const surface = traceLine(point, add(point, scale(along, SPLAT_REACH)), this.world.collision);
+      if (surface.solid && !surface.solid.sky) this.renderer.impacts.add(surface.endPos, surface.normal, this.time, 'blood');
+    }
   }
 
   /**
@@ -626,7 +756,8 @@ class Game {
    */
   opponentCharacter(frameTime) {
     const { match } = this;
-    if (!match?.opponentAlive) return [];
+    if (!match?.opponentAlive) return this.deadOpponent(frameTime);
+    this.ragdoll = null;
     if (match instanceof Versus) this.dressFriend(match);
     const { bot } = this;
     const state = match.character();
@@ -638,7 +769,58 @@ class Game {
     const pose = characters.pose(bot.body, bot.weapon, clip, bot.animTime, state.pos, state.yaw);
     if (bot.body.head >= 0) match.headPoint = worldPoint(pose.matrix, pose.world[bot.body.head]);
     const flash = this.opponentFlash && { age: this.time - this.opponentFlash.at, seed: this.opponentFlash.seed };
-    return [{ body: bot.body, weapon: bot.weapon, pose, yaw: state.yaw, flash }];
+    const facing = viewAxes(state.yaw, 0).forward;
+    const muzzleLight = flash && { age: flash.age, direction: [facing.x, facing.y, 0.3] };
+    const lighting = this.modelLighting.at(this.world, 'opponent', state.pos, this.time, muzzleLight);
+    this.lastOpponent = { body: bot.body, weapon: bot.weapon, pose, vel: { ...state.vel } };
+    return [{ body: bot.body, weapon: bot.weapon, pose, flash, lighting }];
+  }
+
+  /**
+   * A killed opponent falls as a ragdoll from the last pose they were shown
+   * in, knocked along by our last hit if it was the killing one, and lies
+   * there until the next round.
+   */
+  deadOpponent(frameTime) {
+    if (!this.match?.opponentKilled) {
+      this.lastOpponent = null;   // gone rather than killed: nothing falls
+      return [];
+    }
+    if (!this.ragdoll && this.lastOpponent) {
+      const { body, pose, vel } = this.lastOpponent;
+      const hit = this.lastHit && this.time - this.lastHit.at < KILL_HIT_AGE ? this.lastHit : null;
+      const ragdoll = new Ragdoll(body, pose, vel, hit, this.world.collision);
+      this.ragdoll = ragdoll.valid ? ragdoll : null;
+      if (!this.ragdoll) this.lastOpponent = null;
+    }
+    if (!this.ragdoll) return [];
+    this.ragdoll.update(frameTime, this.world.collision);
+    const { body, weapon } = this.lastOpponent;
+    const pose = this.ragdoll.pose();
+    pose.weaponWorld = this.renderer.characters.holdWeapon(body, weapon, pose.world);
+    const lighting = this.modelLighting.at(this.world, 'opponent', worldPoint(pose.matrix, pose.world[this.ragdoll.pelvisNode]), this.time);
+    return [{ body, weapon, pose, lighting }];
+  }
+
+  /** How far the current inaccuracy reaches on screen, in pixels from the center (dynamic crosshair). */
+  spreadPixels() {
+    const stats = this.inventory.stats;
+    if (!stats.inaccuracy) return 0;
+    const cone = this.recoil.inaccuracy(stats, this.player);
+    const pixels = cone / (VIEW.verticalHalfFovTan * this.renderer.camera.zoom) * window.innerHeight / 2;
+    return Math.min(pixels, window.innerHeight * MAX_SPREAD_SCREEN);
+  }
+
+  /** The viewmodel's lighting where the player stands, and the turn from viewmodel space to the world. */
+  viewmodelLighting(kick) {
+    const player = this.player;
+    const { forward, right, up } = viewAxes(player.yaw + kick.yaw, player.pitch + kick.pitch);
+    const flash = { age: this.time - this.renderer.viewmodels.flashAt, direction: [forward.x, forward.y, forward.z] };
+    return {
+      // Viewmodel space is x left, y up, z forward.
+      normalToWorld: new Float32Array([-right.x, -right.y, -right.z, up.x, up.y, up.z, forward.x, forward.y, forward.z]),
+      lighting: this.modelLighting.at(this.world, 'player', player.pos, this.time, flash),
+    };
   }
 
   dressFriend(match) {
@@ -680,30 +862,30 @@ class Game {
     const ready = this.vanity.ready;
     if (!ready) return null;
     const pose = this.renderer.characters.pose(ready.body, ready.held, ready.clip, this.time, { x: 0, y: 0, z: 0 }, 180);
-    return { body: ready.body, weapon: ready.held, pose, yaw: 180 };
+    return { body: ready.body, weapon: ready.held, pose };
   }
 
   frame(now) {
     const frameTime = Math.min((now - this.lastFrame) / 1000, MAX_FRAME_TIME);
     this.lastFrame = now;
     this.time += frameTime;
+    this.hud.countFrame(now);
     this.sky.update(frameTime);
     this.hud.tick(this.time);
 
-    if (this.playing) {
-      this.input.applyMouseLook(this.player, this.inventory.fov / 90);
-      this.accumulator += frameTime;
-      while (this.accumulator >= TICK_INTERVAL) {
-        this.tick();
-        this.accumulator -= TICK_INTERVAL;
-      }
+    // The world runs on behind the menu; only input waits for play.
+    if (this.playing) this.input.applyMouseLook(this.player, this.inventory.fov / 90);
+    this.accumulator += frameTime;
+    while (this.accumulator >= TICK_INTERVAL) {
+      this.tick();
+      this.accumulator -= TICK_INTERVAL;
     }
 
     const player = this.player;
     // View bob: the cycle advances with ground speed; in the air the weapon settles.
     const bobAmount = player.ground ? Math.min(player.horizontalSpeed / 250, 1) : 0;
     this.bobPhase += frameTime * Math.PI * 2 * 1.5 * bobAmount;
-    const kick = this.recoil.viewOffset;
+    const { view: kick, weapon: tilt } = this.recoil.offsetsAt(this.accumulator / TICK_INTERVAL);
     const vanity = this.vanityCharacter();
     const fov = this.inventory.fov;
     this.renderer.camera.zoom = Math.tan(fov * Math.PI / 360);   // tan(fov/2) relative to tan(45°)
@@ -718,7 +900,9 @@ class Game {
       time: this.time,
       characters: this.opponentCharacter(frameTime),
       // Viewmodel animations run on the frame clock, so previews animate while paused.
-      viewmodel: alive && !vanity && !this.inventory.scoped ? { id: this.inventory.current, time: this.time, bobPhase: this.bobPhase, bobAmount } : null,
+      viewmodel: alive && !vanity && !this.inventory.scoped
+        ? { id: this.inventory.current, time: this.time, bobPhase: this.bobPhase, bobAmount, tilt, ...this.viewmodelLighting(kick) }
+        : null,
     });
     if (vanity) this.renderer.drawVanity(vanity);
     this.hud.update({ speed: player.horizontalSpeed, platform: this.world.score ?? 0, best: this.best });
@@ -726,15 +910,26 @@ class Game {
     const entry = this.inventory.entry;
     const finish = entry?.finish && this.manifest?.finishes[entry.finish];
     this.hud.showWeapon(finish ? `${this.inventory.weapon.name} | ${finish.name}` : this.inventory.weapon.name);
+    this.hud.showAmmo(this.inventory.magazine);
+    if (this.crosshair.dynamic) this.crosshair.setSpread(this.spreadPixels());
 
-    requestAnimationFrame((next) => this.frame(next));
+    this.frameId = requestAnimationFrame((next) => this.frame(next));
   }
 }
+
+// If the graphics driver resets, the page's WebGL state is gone: say so, and start over once it is back.
+const canvas = document.getElementById('view');
+canvas.addEventListener('webglcontextlost', (event) => {
+  event.preventDefault();
+  document.getElementById('weapon-status').textContent = 'The graphics driver reset: waiting for it to come back…';
+});
+canvas.addEventListener('webglcontextrestored', () => location.reload());
 
 try {
   new Game();
 } catch (error) {
   document.getElementById('play').disabled = true;
-  document.getElementById('play').textContent = error.message;
+  document.getElementById('play').textContent = 'Cannot start';
+  document.getElementById('weapon-status').textContent = error.message;
   throw error;
 }

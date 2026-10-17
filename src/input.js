@@ -1,6 +1,7 @@
 /**
  * Keyboard and mouse input using the classic default binds (movement, weapon
- * slots 1-3, Q for the last weapon, F to inspect, B for the skin changer, mouse buttons to attack), plus the
+ * slots 1-3, Q for the last weapon, R to reload, F to inspect, B for the buy menu, mouse buttons to attack,
+ * Backspace to restart), plus the
  * standard bhop binds: bind mwheelup +jump and bind mwheeldown +jump.
  * Keys are matched by physical position (event.code), so they work on any layout.
  */
@@ -16,16 +17,17 @@ const BINDS = {
   ControlRight: 'duck',
   ShiftLeft: 'speed',
   ShiftRight: 'speed',
-  KeyR: 'restart',
+  KeyR: 'reload',
+  Backspace: 'restart',
   Digit1: 'slot1',
   Digit2: 'slot2',
   Digit3: 'slot3',
   KeyQ: 'lastinv',
   KeyF: 'inspect',
-  KeyB: 'skins',
+  KeyB: 'buy',
 };
 const MOUSE_BINDS = { 0: 'attack', 2: 'attack2' };
-const ONE_SHOT = new Set(['restart', 'slot1', 'slot2', 'slot3', 'lastinv', 'inspect', 'skins']);
+const ONE_SHOT = new Set(['reload', 'restart', 'slot1', 'slot2', 'slot3', 'lastinv', 'inspect', 'buy']);
 
 export class Input {
   constructor() {
@@ -36,6 +38,7 @@ export class Input {
     this.pressed = new Set();   // one-shot commands since the last tick
     this.clicked = new Set();   // mouse buttons pressed since the last tick, so short clicks count
     this.mouse = { dx: 0, dy: 0 };
+    this.skipMoves = 0;
 
     window.addEventListener('keydown', (event) => this.onKeyDown(event));
     window.addEventListener('keyup', (event) => this.held.delete(BINDS[event.code]));
@@ -53,6 +56,10 @@ export class Input {
 
   setEnabled(enabled) {
     this.enabled = enabled;
+    this.mouse.dx = 0;
+    this.mouse.dy = 0;
+    // Chromium sends one bogus jump (cursor-to-centre) right after pointer lock; drop it.
+    this.skipMoves = 2;
     if (!enabled) this.held.clear();
   }
 
@@ -78,8 +85,14 @@ export class Input {
 
   onMouseMove(event) {
     if (!this.enabled) return;
-    this.mouse.dx += event.movementX;
-    this.mouse.dy += event.movementY;
+    if (this.skipMoves > 0) { this.skipMoves--; return; }
+    const { movementX: x, movementY: y } = event;
+    // Some browsers (Chromium on Linux especially) report spurious huge deltas
+    // when the cursor is warped or the window goes fullscreen. No real mouse
+    // moves that far in a single event, so ignore those.
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > MOUSE.maxEventDelta || Math.abs(y) > MOUSE.maxEventDelta) return;
+    this.mouse.dx += x;
+    this.mouse.dy += y;
   }
 
   /**
@@ -109,7 +122,8 @@ export class Input {
       slot: [1, 2, 3].find((n) => this.pressed.has(`slot${n}`)) ?? 0,
       lastWeapon: this.pressed.has('lastinv'),
       inspect: this.pressed.has('inspect'),
-      skins: this.pressed.has('skins'),
+      buy: this.pressed.has('buy'),
+      reload: this.pressed.has('reload'),
       restart: this.pressed.has('restart'),
     };
     this.wheelJump = false;

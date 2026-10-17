@@ -2,7 +2,7 @@
  * Weapons and weapon finishes: paint inputs, viewmodel clips, sounds and
  * stats of each gun and knife, and the paint parameters of each finish.
  */
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { parseKv3 } from '../kv3.mjs';
 import { first, readText } from './common.mjs';
 import { CLIPS } from './gameData.mjs';
@@ -51,6 +51,7 @@ export function pickClips(data, folders, kind, silenced) {
       idle: [/^idle1?_(?!slide|from|left)/],
       attack: [/^shoot1_/, /^shoot_(left|right)1_/],
       inspect: [/^lookat01_(?!draw|transfix)/],
+      reload: [/^reload_(?!empty)/],
     };
   const clips = {};
   for (const [name, patterns] of Object.entries(rules)) {
@@ -110,12 +111,21 @@ function modeStats(w, i) {
   };
 }
 
-export function weaponStats(w, melee) {
+/** Stats of a gun as held (a silencer on is its second mode), or of a knife. */
+export function weaponStats(w, melee, silenced = false) {
   // Knife swings by the classic rules: a light slash does 25 (40 from behind), a heavy stab 65 (180 from behind).
   if (melee) return { maxSpeed: first(w.m_flMaxSpeed) ?? 250, cycleTime: 0.4, cycleTime2: 1.0, fullAuto: true, damage: 25, damage2: 65, range: 48, range2: 32 };
   const zoomLevels = w.m_nZoomLevels ?? 0;
+  const held = silenced ? 1 : 0;
+  const clip = w.m_iMaxClip1 ?? 30;
   return {
-    ...modeStats(w, 0),
+    ...modeStats(w, held),
+    clip,
+    reserve: (w.m_nPrimaryReserveAmmoMax ?? 0) * (w.m_bReserveAmmoAsClips ? clip : 1),
+    reloadTime: w.m_flDisallowAttackAfterReloadStartDuration ?? 2.5,
+    singleShells: Boolean(w.m_bReloadsSingleShells),
+    tracerFrequency: mode(w.m_nTracerFrequency, held) ?? 1,
+    penetration: w.m_flPenetration ?? 1,
     cycleTime: first(w.m_flCycleTime),
     fullAuto: Boolean(w.m_bIsFullAuto),
     bullets: w.m_nNumBullets ?? 1,
@@ -134,6 +144,26 @@ export function weaponStats(w, melee) {
       scoped: modeStats(w, 1),
     } : null,
   };
+}
+
+const CLIP_FPS = 30;
+
+/**
+ * The reload of a gun from its reload clip's events: sounds at their times
+ * and, for guns loaded a shell at a time, the part of the clip that repeats
+ * per shell. Times are in seconds.
+ */
+export function reloadEvents(data, clipFile) {
+  const doc = parseKv3(readText(join(data.work, clipFile.replace(/\.glb$/, '.vnmclip'))));
+  const events = (doc.m_eventTracks ?? []).flatMap((track) => track.m_events ?? []);
+  const at = (id) => events.find((event) => event.m_ID === id)?.m_flStartTime;
+  const sounds = events
+    .filter((event) => event._class === 'CNmClipDocEvent_Sound')
+    .map((event) => ({ time: event.m_flStartTime / CLIP_FPS, ...eventSound(data, event.m_name) }))
+    .filter((sound) => sound.files);
+  const loop = at('WPN_RELOAD_LOOP');
+  const outro = at('WPN_RELOAD_OUTRO');
+  return { sounds, loop: loop !== undefined && outro !== undefined ? [loop / CLIP_FPS, outro / CLIP_FPS] : null };
 }
 
 /** Value of one composite-material loose variable, plus its random-roll range when it has bounds. */

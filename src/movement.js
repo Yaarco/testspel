@@ -1,7 +1,11 @@
 /**
  * Classic player movement: ground friction and acceleration, air
  * acceleration with the wishspeed cap that makes strafing gain speed, jumps,
- * ducking, and sliding along surfaces.
+ * ducking, sliding along surfaces, walking up steps and staying on the
+ * ground down slopes and stairs.
+ * Ground acceleration follows CS:GO: it scales with at least 250 u/s, so a
+ * heavy gun reaches its top speed as fast as a knife, and ground speed is
+ * clamped to the held weapon's max speed after accelerating.
  * Runs once per tick with a fixed frame time, exactly like the server does.
  *
  * Surfing needs no special code. A ramp steeper than PLAYER.minGroundNormalZ
@@ -9,7 +13,7 @@
  * the ramp while TryPlayerMove clips velocity along its surface.
  */
 import { CONVARS, PLAYER } from './config.js';
-import { traceHull, hullFits } from './collision.js';
+import { DIST_EPSILON, traceHull, hullFits } from './collision.js';
 import { add, cross, dot, normalize, scale, sub, toRadians } from './vector.js';
 
 const FRAME_TIME = 1 / CONVARS.tickrate;
@@ -19,6 +23,7 @@ const MAX_CLIP_PLANES = 5;
 
 /** Runs one tick of movement for a user command against a SolidGrid. */
 export function playerMove(player, cmd, collision) {
+  player.velocityModifier = Math.min(1, player.velocityModifier + PLAYER.tagRecovery * FRAME_TIME);
   duck(player, cmd, collision);
   const wish = wishMove(player, cmd);
   fullWalkMove(player, cmd, wish, collision);
@@ -57,7 +62,7 @@ function wishMove(player, cmd) {
   let forward = cmd.forwardmove;
   let side = cmd.sidemove;
 
-  const maxSpeed = player.maxSpeed;
+  const maxSpeed = player.speedLimit;
   const inputSpeed = Math.hypot(forward, side);
   if (inputSpeed > maxSpeed) {
     forward *= maxSpeed / inputSpeed;
@@ -130,7 +135,7 @@ function accelerate(vel, wish, accel) {
   const addSpeed = wish.speed - currentSpeed;
   if (addSpeed <= 0) return;
 
-  const accelSpeed = Math.min(accel * FRAME_TIME * wish.speed, addSpeed);
+  const accelSpeed = Math.min(accel * FRAME_TIME * Math.max(PLAYER.accelerationScale, wish.speed), addSpeed);
   vel.x += accelSpeed * wish.x;
   vel.y += accelSpeed * wish.y;
 }
@@ -158,12 +163,63 @@ function walkMove(player, wish, collision) {
   accelerate(vel, wish, CONVARS.sv_accelerate);
   vel.z = 0;
 
-  if (Math.hypot(vel.x, vel.y) < 1) {
+  const speed = Math.hypot(vel.x, vel.y);
+  const limit = player.speedLimit;
+  if (speed > limit) {
+    vel.x *= limit / speed;
+    vel.y *= limit / speed;
+  }
+  if (speed < 1) {
     vel.x = 0;
     vel.y = 0;
     return;
   }
+
+  const dest = add(player.pos, scale(vel, FRAME_TIME));
+  const trace = traceHull(player.pos, dest, player.hullHeight, collision);
+  if (trace.fraction === 1) player.pos = trace.endPos;
+  else stepMove(player, collision);
+  stayOnGround(player, collision);
+}
+
+/**
+ * Blocked on the ground: tries the move as is, and again lifted by a step
+ * height and set back down, and keeps whichever got farther (StepMove).
+ */
+function stepMove(player, collision) {
+  const height = player.hullHeight;
+  const start = { ...player.pos };
+  const startVel = { ...player.vel };
+
   tryPlayerMove(player, collision);
+  const down = { pos: player.pos, vel: player.vel };
+
+  player.pos = start;
+  player.vel = startVel;
+  const lift = PLAYER.stepSize + DIST_EPSILON;
+  player.pos = traceHull(player.pos, { ...player.pos, z: player.pos.z + lift }, height, collision).endPos;
+  tryPlayerMove(player, collision);
+  const settle = traceHull(player.pos, { ...player.pos, z: player.pos.z - lift }, height, collision);
+  player.pos = settle.endPos;
+
+  const landed = settle.solid && settle.normal.z >= PLAYER.minGroundNormalZ;
+  const distance = (p) => (p.x - start.x) ** 2 + (p.y - start.y) ** 2;
+  if (!landed || distance(down.pos) > distance(player.pos)) {
+    player.pos = down.pos;
+    player.vel = down.vel;
+  } else {
+    player.vel.z = down.vel.z;
+  }
+}
+
+/** Walking off a slope or down a stair keeps the feet on the ground instead of launching (StayOnGround). */
+function stayOnGround(player, collision) {
+  const height = player.hullHeight;
+  const top = traceHull(player.pos, { ...player.pos, z: player.pos.z + PLAYER.groundTraceDistance }, height, collision).endPos;
+  const trace = traceHull(top, { ...player.pos, z: player.pos.z - PLAYER.stepSize }, height, collision);
+  if (trace.fraction > 0 && trace.fraction < 1 && trace.normal.z >= PLAYER.minGroundNormalZ && Math.abs(player.pos.z - trace.endPos.z) > DIST_EPSILON / 2) {
+    player.pos = trace.endPos;
+  }
 }
 
 function airMove(player, wish, collision) {

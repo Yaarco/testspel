@@ -3,12 +3,15 @@
  * knife plain and in every finish, gloves, agents) with category tabs, a
  * search box and sort order, and an item panel to set an item's wear and
  * pattern and equip it. Equipped items carry a marker; choices are
- * remembered between sessions.
+ * remembered between sessions, and so is the finish last equipped for
+ * each gun, knife and pair of gloves, which the buy menu hands out.
  *
  * Item icons come from the asset pack and load only as their tiles
  * scroll into view, so browsing thousands of items stays light.
  */
 import { exteriorName } from './exterior.js';
+import { element } from './dom.js';
+import { storage } from './storage.js';
 
 const CATEGORIES = [
   { id: 'all', label: 'All' },
@@ -28,6 +31,7 @@ const SORTS = [
 ];
 const CATEGORY_ORDER = Object.fromEntries(CATEGORIES.map(({ id }, i) => [id, i]));
 const STORAGE_KEY = 'loadout';
+const FINISHES_KEY = 'finishes';   // item id -> the entry last equipped for it
 const DEFAULT_LOADOUT = {
   primary: { id: 'ak47', finish: null, wear: 0, seed: 0 },
   secondary: { id: 'usp_silencer', finish: null, wear: 0, seed: 0 },
@@ -37,14 +41,8 @@ const DEFAULT_LOADOUT = {
 };
 const STAR = '★ ';
 
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function categoryOf(weapon) {
+/** The inventory and buy menu category of a weapon. */
+export function categoryOf(weapon) {
   if (weapon.slot === 'knife') return 'knife';
   return { pistol: 'pistol', smg: 'midtier', heavy: 'midtier' }[weapon.type] ?? 'rifle';
 }
@@ -80,8 +78,7 @@ function buildItems(manifest) {
 }
 
 function loadSaved(manifest) {
-  let saved = {};
-  try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? {}; } catch { /* storage unavailable */ }
+  const saved = storage.json(STORAGE_KEY, {});
   const loadout = { ...DEFAULT_LOADOUT };
   for (const slot of ['primary', 'secondary', 'knife']) {
     const entry = saved[slot];
@@ -110,6 +107,7 @@ export class InventoryView {
     this.onInspect = onInspect;
     this.items = buildItems(manifest);
     this.loadout = loadSaved(manifest);
+    this.finishes = storage.json(FINISHES_KEY, {});
     this.category = 'all';
     this.sort = 'rarity';
     this.search = '';
@@ -313,6 +311,21 @@ export class InventoryView {
     this.commit({ ...this.loadout, [slot]: entry }, slot);
   }
 
+  /**
+   * Buys an item from the buy menu: a gun or knife (`kind` 'weapon') or
+   * gloves, with the finish last equipped for it, or plain (gloves: their first finish).
+   */
+  buy(kind, id) {
+    if (kind === 'weapon') {
+      const entry = this.finishes[id] ?? { id, finish: null, wear: 0, seed: 0 };
+      this.commit({ ...this.loadout, [this.manifest.weapons[id].slot]: entry }, this.manifest.weapons[id].slot);
+    } else {
+      const first = this.manifest.gloves[id].finishes[0].id;
+      const entry = this.finishes[id] ?? { id, finish: first, wear: this.manifest.gloveFinishes[first].wear[0], seed: 0 };
+      this.commit({ ...this.loadout, gloves: entry }, 'gloves');
+    }
+  }
+
   unequip(item) {
     const slot = this.slotOf(item);
     this.commit({ ...this.loadout, [slot]: null }, slot);
@@ -320,7 +333,10 @@ export class InventoryView {
 
   commit(loadout, slot) {
     this.loadout = loadout;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(loadout)); } catch { /* storage unavailable */ }
+    const entry = loadout[slot];
+    if (entry && slot !== 'agent') this.finishes[entry.id] = entry;
+    storage.save(STORAGE_KEY, loadout);
+    storage.save(FINISHES_KEY, this.finishes);
     for (const tile of this.grid.querySelectorAll('.inv-tile.equipped')) tile.classList.remove('equipped');
     const visible = this.visibleItems();
     visible.forEach((item, i) => { if (this.isEquipped(item)) this.grid.children[i]?.classList.add('equipped'); });

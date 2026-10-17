@@ -168,18 +168,20 @@ export class SkinnedModels {
   }
 
   /**
-   * Starts drawing: `projection` and `view` (4x4, column-major), the light
-   * direction toward the light in model space, its color and the ambient.
+   * Starts drawing: `projection` and `view` (4x4, column-major), the 3x3
+   * that turns model normals into world directions, and packed `lighting`
+   * (modelLighting.js).
    */
-  begin(projection, view, light) {
+  begin(projection, view, normalToWorld, lighting) {
     const gl = this.gl;
     const { program, uniforms } = this.program;
     gl.useProgram(program);
     gl.uniformMatrix4fv(uniforms.uProjection, false, projection);
     gl.uniformMatrix4fv(uniforms.uModelView, false, view);
-    gl.uniform3f(uniforms.uLightDirection, ...light.direction);
-    gl.uniform3f(uniforms.uLightColor, ...light.color);
-    gl.uniform3f(uniforms.uAmbient, ...light.ambient);
+    gl.uniformMatrix3fv(uniforms.uNormalToWorld, false, normalToWorld);
+    gl.uniform3fv(uniforms['uAmbientCube[0]'], lighting.cube);
+    gl.uniform3fv(uniforms['uLightDirection[0]'], lighting.directions);
+    gl.uniform3fv(uniforms['uLightColor[0]'], lighting.colors);
     gl.uniform1i(uniforms.uBase, 0);
     gl.uniform1i(uniforms.uBones, 1);
   }

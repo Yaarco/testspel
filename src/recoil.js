@@ -8,8 +8,14 @@
  * recoil seed, so a spray always climbs the same way. The punch decays back
  * toward zero. Bullets fly along the view angles plus the punch times
  * weapon_recoil_scale; the camera shows only view_recoil_tracking of that,
- * which is why the crosshair stays below where a spray lands.
+ * which is why the crosshair stays below where a spray lands. Each shot also
+ * jolts the camera by a small view punch that springs back within a few
+ * frames, and the gun in hand tilts by the rest of the punch, so it points
+ * where the bullets go.
  */
+import { PLAYER } from './config.js';
+import { clamp } from './vector.js';
+
 export const RECOIL_CONVARS = {
   weapon_recoil_scale: 2,
   view_recoil_tracking: 0.45,
@@ -19,9 +25,13 @@ export const RECOIL_CONVARS = {
   weapon_recoil_suppression_shots: 4,
   weapon_recoil_suppression_factor: 0.75,
   weapon_recoil_variance: 0.55,
+  weapon_recoil_view_punch_extra: 0.055,
+  view_punch_decay: 18,
 };
 const TABLE_SIZE = 64;
 const RECOVERY_DECADE = Math.log(10);   // recovery time is how long a penalty takes to fall to a tenth
+const JUMP_ROOT = Math.sqrt(PLAYER.jumpImpulse);   // air inaccuracy scales with the root of vertical speed
+const MAX_FALL_PENALTY = 2;                        // up to twice the jump inaccuracy when falling fast
 
 /** A Park-Miller random stream with a shuffle table, so a seed always gives the same sequence. */
 class UniformRandomStream {
@@ -96,6 +106,8 @@ export class Recoil {
   reset() {
     this.punch = { pitch: 0, yaw: 0 };
     this.velocity = { pitch: 0, yaw: 0 };
+    this.viewPunch = { pitch: 0, yaw: 0 };
+    this.before = null;      // the offsets as of the previous tick
     this.index = 0;          // shots into the current spray
     this.penalty = 0;        // inaccuracy added by firing
     this.lastShot = -Infinity;
@@ -112,24 +124,33 @@ export class Recoil {
     const radians = angle * Math.PI / 180;
     this.velocity.pitch -= Math.cos(radians) * magnitude;
     this.velocity.yaw -= Math.sin(radians) * magnitude;
+    const jolt = magnitude * RECOIL_CONVARS.weapon_recoil_view_punch_extra;
+    this.viewPunch.pitch -= Math.cos(radians) * jolt;
+    this.viewPunch.yaw -= Math.sin(radians) * jolt;
     this.index++;
     this.penalty += stats.inaccuracy.fire;
     this.lastShot = time;
   }
 
-  /** Inaccuracy (radians of cone) for the player's stance and speed. */
+  /**
+   * Inaccuracy (radians of cone) for the player's stance and speed. In the
+   * air it grows with vertical speed, so a shot at the top of a jump is far
+   * more accurate than one on the way up or down.
+   */
   inaccuracy(stats, player) {
     const { inaccuracy: values, spread } = stats;
     const base = player.ducked ? values.crouch : values.stand;
     const slow = player.maxSpeed * 0.34;
-    const moving = Math.min(Math.max((player.horizontalSpeed - slow) / (player.maxSpeed * 0.95 - slow), 0), 1);
-    const air = player.ground ? 0 : values.jump;
+    const moving = clamp((player.horizontalSpeed - slow) / (player.maxSpeed * 0.95 - slow), 0, 1);
+    const rising = Math.sqrt(Math.abs(player.vel.z));
+    const air = player.ground ? 0 : values.jump * clamp((rising - JUMP_ROOT * 0.25) / (JUMP_ROOT * 0.75), 0, MAX_FALL_PENALTY);
     return spread + base + values.move * moving + air + this.penalty;
   }
 
   /** Per tick: the punch springs back and, once the trigger is released, the spray and accuracy recover. */
   update(stats, ducked, time, dt) {
     const c = RECOIL_CONVARS;
+    this.before = { view: this.viewOffset, weapon: this.weaponOffset };
     const punch = this.punch;
     const decay = Math.exp(-c.weapon_recoil_decay2_exp * dt);
     punch.pitch *= decay;
@@ -144,6 +165,9 @@ export class Recoil {
     this.velocity.yaw *= velocityDecay;
     punch.pitch += this.velocity.pitch * dt * 0.5;
     punch.yaw += this.velocity.yaw * dt * 0.5;
+    const viewDecay = Math.exp(-c.view_punch_decay * dt);
+    this.viewPunch.pitch *= viewDecay;
+    this.viewPunch.yaw *= viewDecay;
 
     if (!stats?.recoveryTime) return;
     const recovery = ducked ? stats.recoveryTime.crouch : stats.recoveryTime.stand;
@@ -158,9 +182,26 @@ export class Recoil {
     return { pitch: this.punch.pitch * scale, yaw: this.punch.yaw * scale };
   }
 
-  /** How far the camera itself is kicked. */
+  /** How far the camera itself is kicked: its share of the aim punch, plus the view punch. */
   get viewOffset() {
     const scale = RECOIL_CONVARS.weapon_recoil_scale * RECOIL_CONVARS.view_recoil_tracking;
+    return { pitch: this.punch.pitch * scale + this.viewPunch.pitch, yaw: this.punch.yaw * scale + this.viewPunch.yaw };
+  }
+
+  /**
+   * The camera kick and gun tilt `alpha` of the way from the previous tick
+   * to the latest, so they move smoothly at any frame rate.
+   */
+  offsetsAt(alpha) {
+    const mix = (a, b) => ({ pitch: a.pitch + (b.pitch - a.pitch) * alpha, yaw: a.yaw + (b.yaw - a.yaw) * alpha });
+    const view = this.viewOffset;
+    const weapon = this.weaponOffset;
+    return this.before ? { view: mix(this.before.view, view), weapon: mix(this.before.weapon, weapon) } : { view, weapon };
+  }
+
+  /** How far the gun in hand tilts from the view: the part of the aim punch the camera does not show. */
+  get weaponOffset() {
+    const scale = RECOIL_CONVARS.weapon_recoil_scale * (1 - RECOIL_CONVARS.view_recoil_tracking);
     return { pitch: this.punch.pitch * scale, yaw: this.punch.yaw * scale };
   }
 }

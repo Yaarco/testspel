@@ -3,6 +3,8 @@
  * game mode picker with its options, the equipped items list and the GO
  * button. It only shows and reports choices; the game acts on them.
  */
+import { storage } from './storage.js';
+
 const MODE_KEY = 'mode';
 
 export class Menu {
@@ -11,8 +13,7 @@ export class Menu {
     this.root = document.getElementById('menu');
     this.onTab = onTab;
     this.tab = 'play';
-    this.mode = 'course';
-    try { this.mode = localStorage.getItem(MODE_KEY) ?? 'course'; } catch { /* storage unavailable */ }
+    this.mode = storage.text(MODE_KEY, 'course');
     for (const button of document.querySelectorAll('[data-tab]')) {
       button.addEventListener('click', () => this.show(button.dataset.tab));
     }
@@ -40,7 +41,7 @@ export class Menu {
 
   pickMode(mode) {
     this.mode = mode;
-    try { localStorage.setItem(MODE_KEY, mode); } catch { /* storage unavailable */ }
+    storage.save(MODE_KEY, mode);
     for (const button of this.root.querySelectorAll('.cs-mode')) button.setAttribute('aria-checked', String(button.dataset.mode === mode));
     for (const options of this.root.querySelectorAll('.cs-mode-options')) options.hidden = options.dataset.for !== mode;
   }

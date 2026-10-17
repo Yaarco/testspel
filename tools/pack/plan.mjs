@@ -14,7 +14,7 @@ import { GameData } from './gameData.mjs';
 import { readGloveFinish } from './gloves.mjs';
 import {
   ALBEDO_STYLES, CLIP_FOLDERS, FINISH_VARIANTS, STYLE_NAMES, compositesIn, drawSound, eventSound, finishLabel,
-  finishRecord, pickClips, readFinish, weaponStats,
+  finishRecord, pickClips, readFinish, reloadEvents, weaponStats,
 } from './weapons.mjs';
 
 const FOOTSTEPS = 'sounds/player/footsteps';
@@ -141,6 +141,7 @@ export function plan(work, out) {
     const shot = silenced ? w.m_aShootSounds?.WEAPON_SOUND_SPECIAL1 : w.m_aShootSounds?.WEAPON_SOUND_SINGLE;
     const glb = `${withoutExtension(model)}.glb`;
     models.set(glb, MAX_SIZE.gunColor);
+    const clips = pickClips(data, [CLIP_FOLDERS[id] ?? `${category}/${category}_${id}`, `${category}/_default_${category}`], 'gun', silenced);
     weapons[id] = {
       name: data.localize(item.item_name) ?? id,
       slot,
@@ -152,10 +153,11 @@ export function plan(work, out) {
         hd: composites(compositesIn(data, `${dirname(model)}/materials/composite_inputs/`)),
         legacy: paintName ? composites(compositesIn(data, `materials/models/weapons/customization/${paintName}/`)) : [],
       },
-      clips: pickClips(data, [CLIP_FOLDERS[id] ?? `${category}/${category}_${id}`, `${category}/_default_${category}`], 'gun', silenced),
+      clips,
       body: category,
       sounds: { attack: eventSound(data, shot), deploy: drawSound(data, shot) },
-      stats: weaponStats(w, false),
+      reload: clips.reload ? reloadEvents(data, clips.reload[0]) : null,
+      stats: weaponStats(w, false, silenced),
       finishes: finishItems(itemClass, FINISH_VARIANTS[id]),
     };
   }
@@ -286,7 +288,8 @@ export function plan(work, out) {
 
   // The lists of what to extract, leaving out what the output folder already has.
   const missing = missingIn(out);
-  const sounds = [...Object.values(weapons).flatMap((w) => Object.values(w.sounds).flatMap((s) => s?.files ?? [])), ...stepFiles];
+  const weaponSounds = (w) => [...Object.values(w.sounds), ...(w.reload?.sounds ?? [])].flatMap((s) => s?.files ?? []);
+  const sounds = [...Object.values(weapons).flatMap(weaponSounds), ...stepFiles];
   const clipFiles = [
     ...Object.values(weapons).flatMap((w) => Object.values(w.clips).flat()),
     ...Object.values(bodyClips).flatMap(Object.values), ...Object.values(menuPoses).flatMap(Object.values),

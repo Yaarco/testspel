@@ -15,7 +15,7 @@ function tokenize(text) {
   return tokens;
 }
 
-function parseBlock(tokens, position, keepDuplicates = false) {
+function parseBlock(tokens, position) {
   const block = {};
   while (position.index < tokens.length) {
     const key = tokens[position.index++];
@@ -24,20 +24,10 @@ function parseBlock(tokens, position, keepDuplicates = false) {
     const value = tokens[position.index++];
     if (!value) break;
     const name = key.text.toLowerCase();
-    const parsed = value.brace === '{' ? parseBlock(tokens, position, keepDuplicates) : value.text;
-    if (!(name in block)) block[name] = keepDuplicates ? [parsed] : parsed;
-    else if (keepDuplicates) block[name].push(parsed);
+    if (!(name in block)) block[name] = value.brace === '{' ? parseBlock(tokens, position) : value.text;
+    else if (value.brace === '{') parseBlock(tokens, position);   // a repeated key: the first one counts
   }
   return block;
-}
-
-/**
- * Parses a file of several top-level blocks, like sound scripts:
- *   "Weapon_AK47.Single" { "wave" "..." }  "Weapon_AK47.Draw" { ... }
- * Every key maps to the list of its values, since keys such as "wave" repeat.
- */
-export function parseKeyValueList(text) {
-  return parseBlock(tokenize(text), { index: 0 }, true);
 }
 
 /** Returns { name, body } for the first root block. */

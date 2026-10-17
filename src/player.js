@@ -13,11 +13,22 @@ export class Player {
     this.jumpHeld = false;      // jump held last tick, so holding it does not hop again
     this.viewOffset = PLAYER.standEyeHeight;
     this.maxSpeed = PLAYER.maxSpeed;   // set by the held weapon
+    this.velocityModifier = 1;  // below 1 for a moment after being hit
     this.previousEye = this.eye();
   }
 
   get hullHeight() {
     return this.ducked ? PLAYER.duckHeight : PLAYER.standHeight;
+  }
+
+  /** The held weapon's max speed, less any slowdown from being hit. */
+  get speedLimit() {
+    return this.maxSpeed * this.velocityModifier;
+  }
+
+  /** Being hit slows you down for a moment (tagging). */
+  tag() {
+    this.velocityModifier = Math.min(this.velocityModifier, PLAYER.taggedSpeed);
   }
 
   get horizontalSpeed() {
@@ -38,6 +49,7 @@ export class Player {
     this.pitch = 0;
     this.ground = null;
     this.ducked = false;
+    this.velocityModifier = 1;
     this.viewOffset = PLAYER.standEyeHeight;
     this.previousEye = this.eye();
   }

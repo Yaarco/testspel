@@ -3,6 +3,8 @@
  * Audio. The manifest lists the files for each weapon action and each
  * footstep surface; one variant is picked at random per play.
  * Files are fetched and decoded the first time they are needed.
+ * Sequences such as a reload's are scheduled on the game clock, so they
+ * pause with the game and stop when the reload is cut short.
  */
 const MASTER_VOLUME = 0.6;   // at a volume setting of 1
 const PITCH_VARIATION = 0.04;
@@ -41,6 +43,24 @@ export class SoundSystem {
     this.pack = null;
     this.volume = 1;   // the player's volume setting, 0 to 1
     this.buffers = new Map();
+    this.scheduled = [];   // { key, at, files, volume, pan }
+  }
+
+  /** Plays `sounds` ({ time, files, volume }) at `start` + each one's time, replacing what `key` had scheduled. */
+  schedule(key, sounds, start, { volume = 1, pan = 0 } = {}) {
+    this.cancel(key);
+    for (const sound of sounds) this.scheduled.push({ key, at: start + sound.time, files: sound.files, volume: sound.volume * volume, pan });
+  }
+
+  cancel(key) {
+    if (this.scheduled.length) this.scheduled = this.scheduled.filter((sound) => sound.key !== key);
+  }
+
+  /** Plays the scheduled sounds that are due by `time`. */
+  update(time) {
+    if (!this.scheduled.some((sound) => sound.at <= time)) return;
+    for (const sound of this.scheduled) if (sound.at <= time) this.play(sound.files, sound.volume, sound.pan);
+    this.scheduled = this.scheduled.filter((sound) => sound.at > time);
   }
 
   /** Audio can only start after a user gesture, so this is called when play starts. */

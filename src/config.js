@@ -25,6 +25,8 @@ export const PLAYER = {
   walkModifier: 0.52,           // +speed (Shift)
   duckModifier: 0.34,           // +duck (Ctrl) on the ground
   jumpImpulse: Math.sqrt(2 * 800 * 57), // 301.993 u/s, a 57 unit jump
+  accelerationScale: 250,       // ground acceleration scales with at least this speed (CS:GO)
+  stepSize: 18,                 // sv_stepsize: ledges this high are walked up
   nonJumpVelocity: 140,         // moving up faster than this means not on ground
   minGroundNormalZ: 0.7,        // steeper surfaces are not ground: that is what makes surf ramps
   groundTraceDistance: 2,
@@ -34,6 +36,8 @@ export const PLAYER = {
   standEyeHeight: 64,
   duckEyeHeight: 46,
   viewOffsetSpeed: 120,         // how fast the eye slides when ducking, u/s
+  taggedSpeed: 0.5,             // a hit slows you to this share of max speed (tagging)...
+  tagRecovery: 0.4,             // ...and you win back this share per second
 };
 
 export const MOUSE = {
@@ -41,6 +45,9 @@ export const MOUSE = {
   m_yaw: 0.022,                 // degrees per mouse count, times sensitivity
   m_pitch: 0.022,
   maxPitch: 89,
+  minSensitivity: 0.1,
+  maxSensitivity: 10,
+  maxEventDelta: 400,           // counts per mousemove event above this are treated as glitches
 };
 
 export const VIEW = {

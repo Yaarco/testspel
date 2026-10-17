@@ -1,8 +1,9 @@
 /**
  * First-person weapons from the asset pack: the arms
  * skeleton with the weapon's "weapon" bone placed on the arms' "wpn" bone,
- * animated by the pack's viewmodel clips (draw, idle, attacks, inspect),
- * drawn over the world with a viewmodel field of view of 68, plus view bob.
+ * animated by the pack's viewmodel clips (draw, idle, attacks, inspect,
+ * reload), drawn over the world with a viewmodel field of view of 68, plus
+ * view bob and the tilt of recoil.
  *
  * The arms are dressed the usual way: the equipped agent's sleeves and the
  * equipped gloves (or the agent's own gloves) follow the arms skeleton bone
@@ -19,12 +20,12 @@ import { FinishPainter } from './finishes.js';
 import { MuzzleFlash } from './muzzleFlash.js';
 import { SkinnedModels } from './skinnedModels.js';
 import { clipTracks, findTwistBones, followPose, invertRigid, multiply, poseNodes } from './skeleton.js';
+import { reloadClipTime } from './weapons.js';
 
 const HALF_FOV_TAN = Math.tan((68 / 2) * Math.PI / 180) * 0.75;   // viewmodel fov 68, horizontal at 4:3
 const NEAR = 0.01;
 const FAR = 10;
 const INCHES_TO_METERS = 0.0254;
-const LIGHT = { direction: normalize([-0.3, 0.8, -0.5]), color: [0.8, 0.77, 0.72], ambient: [0.3, 0.32, 0.36] };
 const ATTACH_BONE = 'wpn';      // arms bone that carries the weapon
 const WEAPON_BONE = 'weapon';   // weapon bone that goes there
 const SLEEVES = ['firstperson_sleeves'];
@@ -38,19 +39,23 @@ export function transformPoint(m, [x, y, z]) {
   return [0, 1, 2].map((r) => m[r] * x + m[4 + r] * y + m[8 + r] * z + m[12 + r]);
 }
 
-function normalize(v) {
-  const length = Math.hypot(...v);
-  return v.map((c) => c / length);
-}
-
 function perspective(aspect) {
   const f = 1 / HALF_FOV_TAN;
   return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (FAR + NEAR) / (NEAR - FAR), -1, 0, 0, (2 * FAR * NEAR) / (NEAR - FAR), 0]);
 }
 
-/** Viewmodel space (x left, y up, z forward) offset by `t` (meters), into GL eye space. */
-function modelView([tx, ty, tz]) {
-  return new Float32Array([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, -tx, ty, -tz, 1]);
+/**
+ * Viewmodel space (x left, y up, z forward) offset by `t` (meters), into GL
+ * eye space, turned about the eye by `tilt` (degrees; positive pitch down, positive yaw left).
+ */
+function modelView([tx, ty, tz], tilt) {
+  const place = new Float32Array([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, -tx, ty, -tz, 1]);
+  const pitch = -tilt.pitch * Math.PI / 180;
+  const yaw = tilt.yaw * Math.PI / 180;
+  const [sp, cp, sy, cy] = [Math.sin(pitch), Math.cos(pitch), Math.sin(yaw), Math.cos(yaw)];
+  // Yaw about eye y after pitch about eye x, column-major.
+  const turn = new Float32Array([cy, 0, -sy, 0, sy * sp, cp, cy * sp, 0, sy * cp, -sp, cy * cp, 0, 0, 0, 0, 1]);
+  return new Float32Array(multiply(turn, place));
 }
 
 export class Viewmodels {
@@ -67,6 +72,7 @@ export class Viewmodels {
     this.muzzleFlash = new MuzzleFlash(gl);
     this.flashAt = -Infinity;
     this.flashSeed = 0;
+    this.muzzleTangent = null;    // where the muzzle shows on screen, for tracers (see draw)
   }
 
   /** A shot: the muzzle flashes. */
@@ -185,11 +191,17 @@ export class Viewmodels {
     if (this.weapons.has(id)) this.loaded.set(id, weapon);   // ready to draw
   }
 
-  /** Starts a clip ('draw', 'idle', 'attack', 'inspect', ...); one-shot clips return to idle. */
-  play(id, name, time) {
+  /**
+   * Starts a clip ('draw', 'idle', 'attack', 'inspect', 'reload', ...); one-shot
+   * clips return to idle. A reload of several shells repeats the clip's shell part.
+   */
+  play(id, name, time, shells = 1) {
     const choices = this.loaded.get(id)?.clips[name];
     if (!choices?.length) return;
-    this.state = { id, clip: choices[Math.floor(Math.random() * choices.length)], start: time, loop: name === 'idle' };
+    const clip = choices[Math.floor(Math.random() * choices.length)];
+    const loop = name === 'reload' ? this.manifest.weapons[id].reload?.loop ?? null : null;
+    const duration = loop ? clip.duration + (shells - 1) * (loop[1] - loop[0]) : clip.duration;
+    this.state = { id, clip, start: time, idle: name === 'idle', loop, shells, duration };
   }
 
   currentClip(id, time) {
@@ -198,10 +210,11 @@ export class Viewmodels {
       this.play(id, 'idle', time);
       return this.state && { clip: this.state.clip, time: 0 };
     }
-    const elapsed = time - state.start;
-    if (!state.loop && elapsed >= state.clip.duration) this.play(id, 'idle', time);
-    const clip = this.state.clip;
-    return { clip, time: clip.duration > 0 ? (time - this.state.start) % clip.duration : 0 };
+    if (!state.idle && time - state.start >= state.duration) this.play(id, 'idle', time);
+    const { clip, start, loop, shells } = this.state;
+    const elapsed = time - start;
+    if (loop) return { clip, time: Math.min(reloadClipTime(elapsed, loop, shells), clip.duration) };
+    return { clip, time: clip.duration > 0 ? elapsed % clip.duration : 0 };
   }
 
   /**
@@ -216,7 +229,13 @@ export class Viewmodels {
     return local.map((matrix) => multiply(under, matrix));
   }
 
-  /** Draws the held weapon once loaded. `view` = { time, bobPhase, bobAmount }. */
+  /**
+   * Draws the held weapon once loaded. `view` = { time, bobPhase, bobAmount,
+   * tilt, normalToWorld, lighting }: normalToWorld turns viewmodel space into
+   * world directions, for the lighting where the player stands (modelLighting.js).
+   * Keeps where its muzzle shows as `muzzleTangent`: x right and y up, in
+   * units of half the screen height at the viewmodel's field of view.
+   */
   draw(id, view, aspect) {
     const weapon = this.loaded.get(id);
     if (!weapon || !this.arms) return;
@@ -239,7 +258,8 @@ export class Viewmodels {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
-    this.models.begin(perspective(aspect), modelView(offset), LIGHT);
+    const view3d = modelView(offset, view.tilt ?? { pitch: 0, yaw: 0 });
+    this.models.begin(perspective(aspect), view3d, view.normalToWorld, view.lighting);
     if (this.dress.parts.length) {
       for (const { model, painted } of this.dress.parts) {
         this.models.draw(model, followPose(model.nodes, this.arms.nodes, arms), null, painted);
@@ -253,7 +273,9 @@ export class Viewmodels {
       const center = transformPoint(weaponWorld[muzzle.node], muzzle.local);
       const size = FLASH_SIZE * (SILENCED.has(id) ? 0.4 : 1);
       const projection = perspective(aspect);
-      this.muzzleFlash.draw(projection, modelView(offset), center, size, [projection[0], projection[5]], view.time - this.flashAt, this.flashSeed);
+      this.muzzleFlash.draw(projection, view3d, center, size, [projection[0], projection[5]], view.time - this.flashAt, this.flashSeed);
+      const [x, y, z] = transformPoint(view3d, center);
+      this.muzzleTangent = [x / -z / HALF_FOV_TAN, y / -z / HALF_FOV_TAN];
     }
     gl.disable(gl.DEPTH_TEST);
   }
